@@ -11,7 +11,10 @@ from flask import Flask, render_template_string, jsonify, request, session, redi
 from functools import wraps
 import shutil
 
-sys.stdout.reconfigure(encoding='utf-8')
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+except:
+    pass
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(BASE_DIR)
 
