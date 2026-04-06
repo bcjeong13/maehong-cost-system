@@ -1,0 +1,10 @@
+.env
+*.pyc
+__pycache__/
+server.log
+_tmp_*
+*_backup_*
+calc_g0010.py
+cost_system.py
+매홍_통합원가관리시스템.py
+매홍_통합원가분석_리포트.xlsx
