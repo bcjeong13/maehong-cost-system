@@ -56,8 +56,8 @@ def is_admin():
 # ============================================================
 # 데이터 로드
 # ============================================================
-SRC = '단가기준정리.xlsx'
-PRD = '생산실적.xlsx'
+SRC = 'pricing_base.xlsx' if os.path.exists(os.path.join(BASE_DIR, 'pricing_base.xlsx')) else '단가기준정리.xlsx'
+PRD = 'production.xlsx' if os.path.exists(os.path.join(BASE_DIR, 'production.xlsx')) else '생산실적.xlsx'
 wb_src = openpyxl.load_workbook(SRC, data_only=True)
 wb_prd = openpyxl.load_workbook(PRD, data_only=True)
 
@@ -2804,7 +2804,7 @@ document.addEventListener('DOMContentLoaded',()=>{
 # ============================================================
 # 로고 서빙
 # ============================================================
-LOGO_PATH = os.path.join(BASE_DIR, '기업CI.png')
+LOGO_PATH = os.path.join(BASE_DIR, 'logo.png') if os.path.exists(os.path.join(BASE_DIR, 'logo.png')) else os.path.join(BASE_DIR, '기업CI.png')
 
 @app.route('/logo.png')
 def serve_logo():
