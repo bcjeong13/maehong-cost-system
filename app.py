@@ -12,7 +12,8 @@ from functools import wraps
 import shutil
 
 sys.stdout.reconfigure(encoding='utf-8')
-os.chdir(os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+os.chdir(BASE_DIR)
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB
@@ -2800,7 +2801,7 @@ document.addEventListener('DOMContentLoaded',()=>{
 # ============================================================
 # 로고 서빙
 # ============================================================
-LOGO_PATH = os.path.join(BASE_DIR if 'BASE_DIR' in dir() else os.path.dirname(os.path.abspath(__file__)), '기업CI.png')
+LOGO_PATH = os.path.join(BASE_DIR, '기업CI.png')
 
 @app.route('/logo.png')
 def serve_logo():
