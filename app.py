@@ -603,16 +603,41 @@ def api_labor(pn):
                 'formula': f"({hourly_sum:,.2f} × {hours}h) ÷ {capa:,}{unit} × {usage:.4f}{unit} = {cost:,.2f}원",
             })
     total_m = sum(d['cost'] for d in details)
-    # 로터리 상세도 생성
+    # 로터리 상세도 동일 형태로 생성
     details_r = []
     direct_total_r = sum(c for _,c,k,_ in items_r if k != '공통')
     for label, cost, proc_key, usage in items_r:
         meta = PROC_META.get(proc_key, {})
-        capa = meta.get('capa',0); unit = meta.get('unit','')
         if proc_key == '공통':
-            details_r.append({'label':label,'cost':round(cost,2),'capa':0,'unit':'','is_common':True})
+            rate_pct = round(COMMON_RATE * 100, 1)
+            details_r.append({
+                'label': label, 'proc_key': proc_key, 'cost': round(cost, 2),
+                'workers': [], 'hourly_sum': 0, 'hours': 0, 'capa': 0, 'unit': '',
+                'per_unit': 0, 'usage': 0, 'is_common': True,
+                'common_rate': rate_pct, 'direct_labor': round(direct_total_r, 2),
+                'formula': f"직접인건비 {direct_total_r:,.2f}원 × 배부율 {rate_pct}% = {cost:,.2f}원",
+            })
         else:
-            details_r.append({'label':label,'cost':round(cost,2),'capa':capa,'unit':unit,'is_common':False})
+            ws_str = meta.get('workers','')
+            hc = meta.get('hc',0)
+            names = [n.strip() for n in ws_str.replace(' ',',').split(',') if n.strip()] if ws_str else []
+            worker_details = [hw_detail(n) for n in names]
+            for i in range(hc - len(names)):
+                min_hw = round(MIN_WAGE * (1 + RETIRE_RATE), 2)
+                worker_details.append({'name':f'미등록{i+1}','pay':0,'hourly':min_hw,'formula':f'최저시급 {MIN_WAGE:,} + 퇴직8.33%','is_min':True})
+            hourly_sum = sum(w['hourly'] for w in worker_details)
+            capa = meta.get('capa',0)
+            hours = meta.get('hours',8)
+            unit = meta.get('unit','')
+            per_unit = (hourly_sum * hours) / capa if capa > 0 else 0
+            details_r.append({
+                'label': label, 'proc_key': proc_key,
+                'workers': worker_details, 'hourly_sum': round(hourly_sum, 2),
+                'hours': hours, 'capa': capa, 'unit': unit,
+                'per_unit': round(per_unit, 4), 'usage': round(usage, 4),
+                'cost': round(cost, 2), 'is_common': False,
+                'formula': f"({hourly_sum:,.2f} × {hours}h) ÷ {capa:,}{unit} × {usage:.4f}{unit} = {cost:,.2f}원",
+            })
     total_r = sum(d['cost'] for d in details_r)
     return jsonify({
         'product': pr,
@@ -1372,8 +1397,8 @@ tr:hover{background:#edf2f7}
         <td class="r clickable" onclick="openMaterial('{{p.pn}}')" title="클릭: 원재료비 계산식" style="color:#c0392b">{{ "{:,.0f}".format(p.raw) }}</td>
         <td class="r clickable" onclick="openMaterial('{{p.pn}}')" title="클릭: 부재료비 계산식" style="color:#8e44ad">{{ "{:,.0f}".format(p.sub) }}</td>
         {% if is_admin %}
-        <td class="r clickable" onclick="openLabor('{{p.pn}}')" title="클릭: 인건비 계산식" style="font-weight:600;color:#2471a3">{{ "{:,.0f}".format(p.labor_m) }}</td>
-        <td class="r clickable" onclick="openLabor('{{p.pn}}')" title="클릭: 인건비 계산식" style="color:#2471a3">{{ "{:,.0f}".format(p.labor_r) }}</td>
+        <td class="r clickable" onclick="openLabor('{{p.pn}}','manual')" title="클릭: 수작업 인건비 계산식" style="font-weight:600;color:#2471a3">{{ "{:,.0f}".format(p.labor_m) }}</td>
+        <td class="r clickable" onclick="openLabor('{{p.pn}}','rotary')" title="클릭: 로터리 인건비 계산식" style="color:#7BC142">{{ "{:,.0f}".format(p.labor_r) }}</td>
         {% endif %}
         <td class="r" style="font-weight:700;color:var(--primary)">{{ "{:,.0f}".format(p.total_m) }}</td>
         <td class="r">{{ "{:,.0f}".format(p.total_r) }}</td>
@@ -1875,29 +1900,35 @@ async function openMaterial(pn){ openBom(pn); }
 // =========================================
 // 인건비 모달
 // =========================================
-async function openLabor(pn){
+async function openLabor(pn, mode){
+  mode = mode || 'manual';
   openModal(pn,'로딩 중...','<div style="text-align:center;padding:60px;color:var(--muted)">데이터 조회 중...</div>');
   const res=await fetch('/api/labor/'+pn);
   const d=await res.json();
   const p=d.product;
+  const isRotary = mode==='rotary';
+  const modeLabel = isRotary ? '로터리' : '수작업';
+  const modeDetails = isRotary ? (d.details_rotary||d.details) : d.details;
+  const modeTotal = isRotary ? d.total_rotary : d.total_manual;
 
-  document.getElementById('modalTitle').textContent=`[${pn}] ${p.name||''} — 인건비 계산식`;
+  document.getElementById('modalTitle').textContent=`[${pn}] ${p.name||''} — 인건비 계산식 (${modeLabel})`;
   document.getElementById('modalSub').textContent=`${p.category||''} · ${p.type||''} · 절단투입 ${fmt4(d.cut_kg)}KG · 내포장 ${d.inner_ea}EA`;
 
   // 상단 요약
+  const mColor = isRotary ? '#7BC142' : 'var(--accent)';
   let html=`<div class="m-stats">
     <div class="m-stat"><div class="ms-label">절단 투입량</div><div class="ms-value">${fmt4(d.cut_kg)}<span class="ms-unit"> KG</span></div></div>
     <div class="m-stat"><div class="ms-label">내포장 EA</div><div class="ms-value">${d.inner_ea}<span class="ms-unit"> EA</span></div></div>
-    <div class="m-stat accent"><div class="ms-label">인건비(수작업)</div><div class="ms-value" style="color:var(--accent)">${fmt(d.total_manual)}<span class="ms-unit">원</span></div></div>
-    <div class="m-stat"><div class="ms-label">인건비(로터리)</div><div class="ms-value">${fmt(d.total_rotary)}<span class="ms-unit">원</span></div></div>
+    <div class="m-stat ${isRotary?'':'accent'}" style="cursor:pointer;${!isRotary?'border-left-color:var(--accent)':''}" onclick="openLabor('${pn}','manual')"><div class="ms-label">인건비(수작업)</div><div class="ms-value" style="color:var(--accent)">${fmt(d.total_manual)}<span class="ms-unit">원</span></div></div>
+    <div class="m-stat ${isRotary?'accent':''}" style="cursor:pointer;${isRotary?'border-left-color:#7BC142':''}" onclick="openLabor('${pn}','rotary')"><div class="ms-label">인건비(로터리)</div><div class="ms-value" style="color:#7BC142">${fmt(d.total_rotary)}<span class="ms-unit">원</span></div></div>
   </div>`;
 
   const colors=['#2b6cb0','#27ae60','#d4a017','#e74c3c','#8e44ad','#e67e22','#16a085','#c0392b'];
-  let totalCost=d.total_manual;
+  let totalCost=modeTotal;
 
   // 공정별 카드
-  for(let i=0;i<d.details.length;i++){
-    const proc=d.details[i];
+  for(let i=0;i<modeDetails.length;i++){
+    const proc=modeDetails[i];
     const color=colors[i%colors.length];
     const pct=totalCost>0?(proc.cost/totalCost*100).toFixed(1):'0';
 
@@ -1946,30 +1977,18 @@ async function openLabor(pn){
     }
   }
 
-  // 합계 (수작업)
-  html+=`<div class="labor-total">
-    <div class="lt-items">${d.details.map(p=>`${p.label} ${fmt(p.cost)}원`).join(' + ')}</div>
+  // 합계
+  html+=`<div class="labor-total" style="background:${isRotary?'#2d7a2d':'var(--primary)'}">
+    <div class="lt-items">${modeDetails.map(p=>`${p.label} ${fmt(p.cost)}원`).join(' + ')}</div>
     <div style="text-align:right">
-      <div class="lt-sum">수작업 = ${fmt(d.total_manual)}원</div>
+      <div class="lt-sum">${modeLabel} = ${fmt(modeTotal)}원</div>
     </div>
   </div>`;
 
-  // 로터리 상세
-  if(d.details_rotary&&d.details_rotary.length){
-    html+=`<div style="margin-top:16px;font-size:13px;font-weight:700;color:var(--primary);padding:6px 0;border-bottom:2px solid #7BC142">인건비(로터리) 상세</div>`;
-    html+=`<table style="margin-top:8px"><thead><tr><th>공정</th><th>CAPA</th><th>인건비</th></tr></thead><tbody>`;
-    for(const proc of d.details_rotary){
-      html+=`<tr><td>${proc.label}</td><td class="r">${proc.capa?proc.capa.toLocaleString()+proc.unit:'-'}</td>
-        <td class="r" style="font-weight:600">${fmt(proc.cost)}원</td></tr>`;
-    }
-    html+=`<tr style="background:#7BC142;color:#fff;font-weight:700"><td>합계</td><td></td><td class="r">${fmt(d.total_rotary)}원</td></tr>`;
-    html+=`</tbody></table>`;
-  }
-
   // 비율 바
   html+=`<div class="ratio-bar">`;
-  for(let i=0;i<d.details.length;i++){
-    const proc=d.details[i];
+  for(let i=0;i<modeDetails.length;i++){
+    const proc=modeDetails[i];
     const pct=totalCost>0?(proc.cost/totalCost*100):0;
     if(pct<1.5)continue;
     html+=`<div style="width:${pct}%;background:${colors[i%colors.length]}" title="${proc.label}: ${fmt(proc.cost)}원">${pct>=8?proc.label:''} ${pct.toFixed(0)}%</div>`;
