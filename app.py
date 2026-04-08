@@ -603,11 +603,21 @@ def api_labor(pn):
                 'formula': f"({hourly_sum:,.2f} × {hours}h) ÷ {capa:,}{unit} × {usage:.4f}{unit} = {cost:,.2f}원",
             })
     total_m = sum(d['cost'] for d in details)
-    total_r = sum(c for _,c,_,_ in items_r)
+    # 로터리 상세도 생성
+    details_r = []
+    direct_total_r = sum(c for _,c,k,_ in items_r if k != '공통')
+    for label, cost, proc_key, usage in items_r:
+        meta = PROC_META.get(proc_key, {})
+        capa = meta.get('capa',0); unit = meta.get('unit','')
+        if proc_key == '공통':
+            details_r.append({'label':label,'cost':round(cost,2),'capa':0,'unit':'','is_common':True})
+        else:
+            details_r.append({'label':label,'cost':round(cost,2),'capa':capa,'unit':unit,'is_common':False})
+    total_r = sum(d['cost'] for d in details_r)
     return jsonify({
         'product': pr,
         'cut_kg': round(kg, 4), 'inner_ea': ea,
-        'details': details,
+        'details': details, 'details_rotary': details_r,
         'total_manual': round(total_m, 2),
         'total_rotary': round(total_r, 2),
     })
@@ -1936,14 +1946,25 @@ async function openLabor(pn){
     }
   }
 
-  // 합계
+  // 합계 (수작업)
   html+=`<div class="labor-total">
     <div class="lt-items">${d.details.map(p=>`${p.label} ${fmt(p.cost)}원`).join(' + ')}</div>
     <div style="text-align:right">
-      <div class="lt-sum">= ${fmt(d.total_manual)}원</div>
-      <div class="lt-sub">로터리 기준: ${fmt(d.total_rotary)}원 (차이 ${fmt(d.total_manual-d.total_rotary)}원)</div>
+      <div class="lt-sum">수작업 = ${fmt(d.total_manual)}원</div>
     </div>
   </div>`;
+
+  // 로터리 상세
+  if(d.details_rotary&&d.details_rotary.length){
+    html+=`<div style="margin-top:16px;font-size:13px;font-weight:700;color:var(--primary);padding:6px 0;border-bottom:2px solid #7BC142">인건비(로터리) 상세</div>`;
+    html+=`<table style="margin-top:8px"><thead><tr><th>공정</th><th>CAPA</th><th>인건비</th></tr></thead><tbody>`;
+    for(const proc of d.details_rotary){
+      html+=`<tr><td>${proc.label}</td><td class="r">${proc.capa?proc.capa.toLocaleString()+proc.unit:'-'}</td>
+        <td class="r" style="font-weight:600">${fmt(proc.cost)}원</td></tr>`;
+    }
+    html+=`<tr style="background:#7BC142;color:#fff;font-weight:700"><td>합계</td><td></td><td class="r">${fmt(d.total_rotary)}원</td></tr>`;
+    html+=`</tbody></table>`;
+  }
 
   // 비율 바
   html+=`<div class="ratio-bar">`;
