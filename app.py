@@ -959,6 +959,47 @@ def _get_mat_name(pn):
     return ''
 
 # ============================================================
+# 기준CAPA 관리 API
+# ============================================================
+PROC_LABELS = {
+    '절단':'절단 (고구마류)','큐브':'선별(큐브)','로터리':'내포장(로터리)','수작업':'내포장(수작업)',
+    '나라시':'대차나라시','살균':'살균(고구마류)','선날인':'선날인','번들':'외포장(번들,고구마류)',
+    '낱봉':'외포장(낱봉,고구마류)','절단바':'절단(고구마바류)','선별바':'선별(바타입)',
+    '살균바':'살균(고구마바류)','번들바':'외포장(번들,고구마바류)',
+    '오트밀':'오트밀생산','스틱':'유탕스틱생산','공통':'공통배부(관리자)',
+}
+
+@app.route('/api/capa')
+@login_required
+@admin_required
+def api_capa():
+    rows = []
+    for key, meta in PROC_META.items():
+        rows.append({
+            'key': key, 'label': PROC_LABELS.get(key, key),
+            'workers': meta['workers'], 'hc': meta['hc'],
+            'hours': meta['hours'], 'capa': meta['capa'], 'unit': meta['unit'],
+        })
+    return jsonify({'capa_list': rows})
+
+@app.route('/api/capa/update', methods=['POST'])
+@login_required
+@admin_required
+def api_capa_update():
+    d = request.get_json()
+    key = d.get('key','')
+    if key not in PROC_META:
+        return jsonify({'ok':False,'msg':f'공정 {key}를 찾을 수 없습니다'}), 404
+    old = PROC_META[key].copy()
+    if 'workers' in d: PROC_META[key]['workers'] = d['workers']
+    if 'hc' in d: PROC_META[key]['hc'] = int(d['hc'])
+    if 'capa' in d: PROC_META[key]['capa'] = int(d['capa'])
+    if 'hours' in d: PROC_META[key]['hours'] = int(d['hours'])
+    if 'unit' in d: PROC_META[key]['unit'] = d['unit']
+    _recalc_all()
+    return jsonify({'ok':True,'msg':f'{PROC_LABELS.get(key,key)} 변경 완료 (CAPA: {old["capa"]:,} → {PROC_META[key]["capa"]:,})'})
+
+# ============================================================
 # 인건비 검증 API
 # ============================================================
 verify_data = {'cost_report': {}}  # 원가보고서만 별도, 생산실적은 prod_records 공유
@@ -1783,6 +1824,23 @@ tr:hover{background:#edf2f7}
         <th>No</th><th>품번</th><th>품명</th><th>단가(원)</th><th>단가일</th><th>관리</th>
       </tr></thead>
       <tbody id="matBody"></tbody>
+    </table>
+    </div>
+  </div>
+
+  <!-- 기준CAPA 관리 -->
+  <div class="card">
+    <h3>기준CAPA 관리 <span style="font-size:12px;color:var(--muted);font-weight:400">— 인원/CAPA를 수정하고 저장하면 전체 원가가 즉시 재계산됩니다</span></h3>
+    <div style="overflow-x:auto">
+    <table id="capaTable" style="table-layout:fixed;width:100%">
+      <colgroup>
+        <col style="width:50px"><col style="width:150px"><col style="width:auto">
+        <col style="width:70px"><col style="width:100px"><col style="width:60px"><col style="width:100px">
+      </colgroup>
+      <thead><tr>
+        <th>No</th><th>공정</th><th>투입인원</th><th>인원수</th><th>CAPA</th><th>단위</th><th>관리</th>
+      </tr></thead>
+      <tbody id="capaBody"></tbody>
     </table>
     </div>
   </div>
@@ -2844,13 +2902,55 @@ function filterMatTable(){
   });
 }
 
+// =========================================
+// 기준CAPA 관리
+// =========================================
+async function loadCapa(){
+  const res=await fetch('/api/capa');
+  const d=await res.json();
+  const tbody=document.getElementById('capaBody');
+  if(!tbody) return;
+  let html='';
+  d.capa_list.forEach((c,i)=>{
+    html+=`<tr>
+      <td class="c">${i+1}</td>
+      <td style="font-weight:600">${c.label}</td>
+      <td><input type="text" value="${c.workers}" id="capaW-${i}" data-key="${c.key}"
+        style="width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:6px;font-size:11px"
+        onchange="this.style.borderColor='var(--warn)';this.style.background='#fffbeb'"></td>
+      <td class="c"><input type="number" value="${c.hc}" id="capaH-${i}"
+        style="width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:6px;font-size:13px;text-align:center"
+        onchange="this.style.borderColor='var(--warn)';this.style.background='#fffbeb'"></td>
+      <td class="c"><input type="number" value="${c.capa}" id="capaC-${i}"
+        style="width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:6px;font-size:13px;text-align:right;font-weight:700"
+        onchange="this.style.borderColor='var(--warn)';this.style.background='#fffbeb'"></td>
+      <td class="c">${c.unit}</td>
+      <td class="c"><button onclick="saveCapa(${i})" style="padding:4px 12px;background:var(--accent);color:#fff;border:none;border-radius:5px;font-size:11px;cursor:pointer">저장</button></td>
+    </tr>`;
+  });
+  tbody.innerHTML=html;
+}
+
+async function saveCapa(idx){
+  const key=document.getElementById('capaW-'+idx).dataset.key;
+  const workers=document.getElementById('capaW-'+idx).value;
+  const hc=parseInt(document.getElementById('capaH-'+idx).value)||0;
+  const capa=parseInt(document.getElementById('capaC-'+idx).value)||0;
+  const res=await fetch('/api/capa/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key,workers,hc,capa})});
+  const d=await res.json();
+  if(d.ok){
+    ['capaW-','capaH-','capaC-'].forEach(p=>{const el=document.getElementById(p+idx);if(el){el.style.borderColor='var(--good)';el.style.background='#f0fff4';setTimeout(()=>{el.style.borderColor='var(--border)';el.style.background='#fff'},1500);}});
+    alert(d.msg);
+  } else {alert(d.msg);}
+}
+
 // 탭 전환 시 데이터 로드
 const origShowTab=showTab;
 showTab=function(n){
   origShowTab(n);
   if(n===1) loadProdRecords();
   if(n===4) initVerify();
-  if(n===7){loadEmployees();loadMaterials();}
+  if(n===7){loadEmployees();loadMaterials();loadCapa();}
 };
 document.addEventListener('DOMContentLoaded',()=>{
   if(document.querySelector('#p7.active')){loadEmployees();loadMaterials();}
