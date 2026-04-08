@@ -538,8 +538,9 @@ def api_material(pn):
 
 @app.route('/api/labor/<pn>')
 @login_required
+@admin_required
 def api_labor(pn):
-    """인건비 상세 계산식 (제품 + 반제품 모두 지원)"""
+    """인건비 상세 계산식 (admin 전용)"""
     pr = products.get(pn, {})
     if not pr and pn in semi_products:
         sp = semi_products[pn]
@@ -1333,7 +1334,7 @@ tr:hover{background:#edf2f7}
 <div class="panel active" id="p0">
   <div class="stats">
     <div class="stat"><div class="label">총 품목수</div><div class="value">{{ total_products }}</div></div>
-    <div class="stat warn"><div class="label">평균 인건비(수작업)</div><div class="value">{{ avg_labor }}원</div></div>
+    {% if is_admin %}<div class="stat warn"><div class="label">평균 인건비(수작업)</div><div class="value">{{ avg_labor }}원</div></div>{% endif %}
     <div class="stat"><div class="label">평균 원부재료비</div><div class="value">{{ avg_mat }}원</div></div>
     <div class="stat good"><div class="label">평균 기준원가</div><div class="value">{{ avg_total }}원</div></div>
   </div>
@@ -1344,7 +1345,8 @@ tr:hover{background:#edf2f7}
     <table id="t1">
       <thead><tr>
         <th>품번</th><th>품명</th><th>카테고리</th><th>중량</th><th>유형</th>
-        <th>원재료비</th><th>부재료비</th><th>인건비(수작업)</th><th>인건비(로터리)</th>
+        <th>원재료비</th><th>부재료비</th>
+        {% if is_admin %}<th>인건비(수작업)</th><th>인건비(로터리)</th>{% endif %}
         <th>기준원가(수작업)</th><th>기준원가(로터리)</th>
       </tr></thead>
       <tbody>
@@ -1357,8 +1359,10 @@ tr:hover{background:#edf2f7}
         <td class="c"><span class="badge {{ 'badge-warn' if p.ptype=='번들' else 'badge-good' }}">{{ p.ptype }}</span></td>
         <td class="r clickable" onclick="openMaterial('{{p.pn}}')" title="클릭: 원재료비 계산식" style="color:#c0392b">{{ "{:,.0f}".format(p.raw) }}</td>
         <td class="r clickable" onclick="openMaterial('{{p.pn}}')" title="클릭: 부재료비 계산식" style="color:#8e44ad">{{ "{:,.0f}".format(p.sub) }}</td>
+        {% if is_admin %}
         <td class="r clickable" onclick="openLabor('{{p.pn}}')" title="클릭: 인건비 계산식" style="font-weight:600;color:#2471a3">{{ "{:,.0f}".format(p.labor_m) }}</td>
         <td class="r clickable" onclick="openLabor('{{p.pn}}')" title="클릭: 인건비 계산식" style="color:#2471a3">{{ "{:,.0f}".format(p.labor_r) }}</td>
+        {% endif %}
         <td class="r" style="font-weight:700;color:var(--primary)">{{ "{:,.0f}".format(p.total_m) }}</td>
         <td class="r">{{ "{:,.0f}".format(p.total_r) }}</td>
       </tr>
@@ -1418,7 +1422,7 @@ tr:hover{background:#edf2f7}
       <table id="prodTable">
         <thead><tr>
           <th>일자</th><th>품번</th><th>품명</th><th>구분</th><th>실적수량</th><th>ERP단가</th>
-          <th>기준인건비/EA</th><th>실제인건비/EA</th><th>기준 EA/MH</th><th>실제 EA/MH</th><th>생산성</th><th>비고</th>
+          {% if is_admin %}<th>기준인건비/EA</th><th>실제인건비/EA</th>{% endif %}<th>기준 EA/MH</th><th>실제 EA/MH</th><th>생산성</th><th>비고</th>
         </tr></thead>
         <tbody id="prodBody"></tbody>
       </table>
@@ -1428,6 +1432,7 @@ tr:hover{background:#edf2f7}
 
 <!-- 탭3: 이슈 분석 -->
 <div class="panel" id="p2">
+  {% if is_admin %}
   <div class="compare-grid">
     <div class="card">
       <h3>수작업 vs 로터리 내포장</h3>
@@ -1473,6 +1478,7 @@ tr:hover{background:#edf2f7}
       </tbody>
     </table>
   </div>
+  {% endif %}
   {% if is_admin %}
   <div class="card">
     <h3>공정별 인원 시급 현황</h3>
@@ -1796,13 +1802,13 @@ async function openBom(pn){
   const bomCount=md.mat_items.length;
 
   document.getElementById('modalTitle').textContent=`[${pn}] ${p.name||''}`;
-  document.getElementById('modalSub').textContent=`${p.category||''} · 자재 ${bomCount}건 · 기준인건비 ${fmt(ld.total_manual)}원/EA`;
+  document.getElementById('modalSub').textContent=`${p.category||''} · 자재 ${bomCount}건${_isAdmin?' · 기준인건비 '+fmt(ld.total_manual)+'원/EA':''}`;
 
   // 상단 요약 카드
   let html=`<div class="m-stats">
     <div class="m-stat accent"><div class="ms-label">원재료비(A)</div><div class="ms-value" style="color:#c0392b">${fmt0(md.raw_total)}<span class="ms-unit">원</span></div></div>
     <div class="m-stat"><div class="ms-label">부재료비</div><div class="ms-value" style="color:#8e44ad">${fmt0(md.sub_total)}<span class="ms-unit">원</span></div></div>
-    <div class="m-stat"><div class="ms-label">기준인건비/EA</div><div class="ms-value" style="color:#2471a3">${fmt(ld.total_manual)}<span class="ms-unit">원</span></div></div>
+    ${_isAdmin?`<div class="m-stat"><div class="ms-label">기준인건비/EA</div><div class="ms-value" style="color:#2471a3">${fmt(ld.total_manual)}<span class="ms-unit">원</span></div></div>`:''}
     <div class="m-stat total"><div class="ms-label">합계</div><div class="ms-value">${fmt0(md.total + ld.total_manual)}<span class="ms-unit">원</span></div></div>
   </div>`;
 
@@ -2068,8 +2074,9 @@ async function loadProdRecords(){
       <td class="c"><span class="badge ${badge}" style="font-size:10px">${typeStr}</span></td>
       <td class="r">${fmt0(r.qty)}</td>
       <td class="r">${fmt0(r.erp_price)}</td>
-      <td class="r clickable" onclick="openLabor('${r.pn}')" style="color:var(--accent)">${r.labor_ea?fmt0(r.labor_ea):'-'}</td>
-      ${actualEaCell}
+      ${_isAdmin?`<td class="r clickable" onclick="openLabor('${r.pn}')" style="color:var(--accent)">${r.labor_ea?fmt0(r.labor_ea):'-'}</td>
+      ${actualEaCell}`:''}
+
       ${stdCell}
       ${actMhCell}
       ${prodCell}
@@ -2098,7 +2105,7 @@ async function openProdDetail(pn){
   let html=`<div class="m-stats">
     <div class="m-stat accent"><div class="ms-label">원재료비</div><div class="ms-value" style="color:#c0392b">${fmt0(c.raw)}<span class="ms-unit">원</span></div></div>
     <div class="m-stat"><div class="ms-label">부재료비</div><div class="ms-value" style="color:#8e44ad">${fmt0(c.sub)}<span class="ms-unit">원</span></div></div>
-    <div class="m-stat"><div class="ms-label">인건비</div><div class="ms-value" style="color:#2471a3">${fmt(c.labor)}<span class="ms-unit">원</span></div></div>
+    ${_isAdmin?`<div class="m-stat"><div class="ms-label">인건비</div><div class="ms-value" style="color:#2471a3">${fmt(c.labor)}<span class="ms-unit">원</span></div></div>`:''}
     <div class="m-stat total"><div class="ms-label">기준원가</div><div class="ms-value">${fmt0(c.total)}<span class="ms-unit">원</span></div></div>
     <div class="m-stat"><div class="ms-label">총 생산수량</div><div class="ms-value">${fmt0(d.total_qty)}<span class="ms-unit">EA</span></div></div>
   </div>`;
