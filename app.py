@@ -58,98 +58,102 @@ def is_admin():
 # ============================================================
 SRC = 'pricing_base.xlsx' if os.path.exists(os.path.join(BASE_DIR, 'pricing_base.xlsx')) else '단가기준정리.xlsx'
 PRD = 'production.xlsx' if os.path.exists(os.path.join(BASE_DIR, 'production.xlsx')) else '생산실적.xlsx'
-wb_src = openpyxl.load_workbook(SRC, data_only=True)
-wb_prd = openpyxl.load_workbook(PRD, data_only=True)
 
-# 자사 생산제품
-ws = wb_src['자사 생산제품']
-products = {}
-for r in range(2, ws.max_row+1):
-    pn = ws.cell(r,3).value
-    if not pn: continue
-    products[str(pn).strip()] = {
-        'pn': str(pn).strip(), 'name': ws.cell(r,4).value or '',
-        'category': ws.cell(r,5).value or '', 'weight_g': ws.cell(r,6).value or 0,
-        'type': ws.cell(r,7).value or '',
-    }
+def reload_all_data():
+    """단가기준정리 파일에서 전체 데이터 재로드 + 재계산"""
+    global products, bom, bom_raw, semi_products, employee_wages, material_prices
+    global cost_report, PROC_META, P, COMMON_RATE, semi_costs, all_costs
+    _load_src_data()
+    # 공정단가 재계산
+    for k,m in PROC_META.items():
+        P[k] = wsum(m['workers'],m['hc'])*m['hours']/m['capa']
+    COMMON_RATE = calc_common_rate()
+    # 원가 재계산
+    for epn in semi_products:
+        lab_m, li_m = calc_semi_labor(epn, True)
+        lab_r, li_r = calc_semi_labor(epn, False)
+        semi_costs[epn] = {'m': {'labor': lab_m, 'labor_items': li_m}, 'r': {'labor': lab_r, 'labor_items': li_r}}
+    for pn in products:
+        all_costs[pn] = {'m': calc_cost(pn, True), 'r': calc_cost(pn, False)}
 
-# BOM (원본 보존 - 반제품 포함)
-ws = wb_src['bom현황']
-bom = defaultdict(list)
-bom_raw = defaultdict(list)  # 반제품 포함 원본
-for r in range(2, ws.max_row+1):
-    mo = ws.cell(r,2).value
-    if not mo: continue
-    item = {
-        'ja_pn': str(ws.cell(r,11).value).strip() if ws.cell(r,11).value else '',  # col11: 자품번
-        'ja_name': ws.cell(r,12).value or '',   # col12: 자품명
-        'ja_type': ws.cell(r,13).value or '',   # col13: 규격
-        'ja_unit': ws.cell(r,14).value or '',   # col14: 재고단위
-        'qty_net': ws.cell(r,15).value or 0,    # col15: 정미수량
-        'loss_pct': ws.cell(r,16).value or 0,   # col16: LOSS(%)
-        'qty_req': ws.cell(r,17).value or 0,    # col17: 필요수량
-    }
-    mo_s = str(mo).strip()
-    bom[mo_s].append(item)
-    bom_raw[mo_s].append(item)
-
-# 반제품 메타 (E코드 → 품명, 규격, 카테고리)
-semi_products = {}
-for r in range(2, ws.max_row+1):
-    mo = ws.cell(r,2).value
-    if not mo: continue
-    mo_s = str(mo).strip()
-    if mo_s.startswith('E') and mo_s not in semi_products:
-        cat_col = ws.cell(r,4).value or ''    # col4: 카테고리 (고구마류 / 고구마바류)
-        spec = ws.cell(r,5).value or ''       # col5: 규격 (반제품 / 반제품(2))
-        semi_products[mo_s] = {
-            'pn': mo_s,
-            'name': ws.cell(r,3).value or '',
-            'spec': spec,
-            'cat': '고구마바류' if '고구마바' in str(cat_col) else '고구마류',
+def _load_src_data():
+    """단가기준정리.xlsx 파일 파싱"""
+    global products, bom, bom_raw, semi_products, employee_wages, material_prices, cost_report
+    wb_src = openpyxl.load_workbook(SRC, data_only=True)
+    # 자사 생산제품
+    ws = wb_src['자사 생산제품']
+    products = {}
+    for r in range(2, ws.max_row+1):
+        pn = ws.cell(r,3).value
+        if not pn: continue
+        products[str(pn).strip()] = {
+            'pn': str(pn).strip(), 'name': ws.cell(r,4).value or '',
+            'category': ws.cell(r,5).value or '', 'weight_g': ws.cell(r,6).value or 0,
+            'type': ws.cell(r,7).value or '',
         }
-
-# 인건비
-ws = wb_src['인건비 현황']
-employee_wages = {}
-for r in range(2, ws.max_row+1):
-    name = ws.cell(r,3).value
-    pay = ws.cell(r,6).value
-    col7 = ws.cell(r,7).value or ''
-    if name:
-        employee_wages[str(name).strip()] = {
-            'pay': pay if pay else 0, 'common': '공통배부' in str(col7),
+    # BOM
+    ws = wb_src['bom현황']
+    bom.clear(); bom_raw.clear()
+    for r in range(2, ws.max_row+1):
+        mo = ws.cell(r,2).value
+        if not mo: continue
+        item = {
+            'ja_pn': str(ws.cell(r,11).value).strip() if ws.cell(r,11).value else '',
+            'ja_name': ws.cell(r,12).value or '', 'ja_type': ws.cell(r,13).value or '',
+            'ja_unit': ws.cell(r,14).value or '', 'qty_net': ws.cell(r,15).value or 0,
+            'loss_pct': ws.cell(r,16).value or 0, 'qty_req': ws.cell(r,17).value or 0,
         }
+        mo_s = str(mo).strip()
+        bom[mo_s].append(item); bom_raw[mo_s].append(item)
+    # 반제품 메타
+    semi_products = {}
+    for r in range(2, ws.max_row+1):
+        mo = ws.cell(r,2).value
+        if not mo: continue
+        mo_s = str(mo).strip()
+        if mo_s.startswith('E') and mo_s not in semi_products:
+            cat_col = ws.cell(r,4).value or ''
+            spec = ws.cell(r,5).value or ''
+            semi_products[mo_s] = {
+                'pn': mo_s, 'name': ws.cell(r,3).value or '', 'spec': spec,
+                'cat': '고구마바류' if '고구마바' in str(cat_col) else '고구마류',
+            }
+    # 인건비
+    ws = wb_src['인건비 현황']
+    employee_wages.clear()
+    for r in range(2, ws.max_row+1):
+        name = ws.cell(r,3).value; pay = ws.cell(r,6).value; col7 = ws.cell(r,7).value or ''
+        if name:
+            employee_wages[str(name).strip()] = {'pay': pay if pay else 0, 'common': '공통배부' in str(col7)}
+    # 원부재료비
+    ws = wb_src['원부재료비']
+    material_prices.clear()
+    for r in range(2, ws.max_row+1):
+        pn = ws.cell(r,10).value; price = ws.cell(r,17).value; dt = ws.cell(r,2).value
+        if pn and price:
+            pn_s = str(pn).strip()
+            if pn_s not in material_prices or (dt and dt > (material_prices[pn_s]['date'] or datetime.min)):
+                material_prices[pn_s] = {'price': price, 'date': dt}
+    # 원가보고서
+    ws_cr = wb_src['원가보고서'] if '원가보고서' in wb_src.sheetnames else None
+    cost_report.clear()
+    if ws_cr:
+        for c in range(3, ws_cr.max_column+1):
+            month_name = ws_cr.cell(1, c).value
+            if not month_name: continue
+            month_name = str(month_name).strip()
+            cost_report[month_name] = {
+                'labor_total': ws_cr.cell(14, c).value or 0,
+                'salary': ws_cr.cell(15, c).value or 0,
+                'misc': ws_cr.cell(16, c).value or 0,
+                'retire': ws_cr.cell(17, c).value or 0,
+            }
 
-# 원부재료비
-ws = wb_src['원부재료비']
-material_prices = {}
-for r in range(2, ws.max_row+1):
-    pn = ws.cell(r,10).value; price = ws.cell(r,17).value; dt = ws.cell(r,2).value
-    if pn and price:
-        pn_s = str(pn).strip()
-        if pn_s not in material_prices or (dt and dt > (material_prices[pn_s]['date'] or datetime.min)):
-            material_prices[pn_s] = {'price': price, 'date': dt}
-
-# 원가보고서 로드
-ws_cost_report = wb_src['원가보고서'] if '원가보고서' in wb_src.sheetnames else None
-cost_report = {}  # {'1월': {'노무비':X, '급여':Y, '퇴직급여':Z}, ...}
-if ws_cost_report:
-    # 월 컬럼 매핑 (Col3=1월, Col4=2월, ...)
-    for c in range(3, ws_cost_report.max_column+1):
-        month_name = ws_cost_report.cell(1, c).value
-        if not month_name: continue
-        month_name = str(month_name).strip()
-        labor_total = ws_cost_report.cell(14, c).value or 0  # Row14: 노무비 합계
-        salary = ws_cost_report.cell(15, c).value or 0        # Row15: 급여
-        misc = ws_cost_report.cell(16, c).value or 0          # Row16: 잡급
-        retire = ws_cost_report.cell(17, c).value or 0         # Row17: 퇴직급여
-        cost_report[month_name] = {
-            'labor_total': labor_total,
-            'salary': salary,
-            'misc': misc,
-            'retire': retire,
-        }
+# 초기화용 글로벌 변수
+products = {}; bom = defaultdict(list); bom_raw = defaultdict(list)
+semi_products = {}; employee_wages = {}; material_prices = {}; cost_report = {}
+# 초기 데이터 로드
+_load_src_data()
 
 # 생산실적 (누적 저장)
 prod_records = []
@@ -663,7 +667,12 @@ def api_upload():
     if os.path.exists(SRC):
         shutil.copy2(SRC, backup)
     f.save(SRC)
-    return jsonify({'ok':True,'msg':f'업로드 완료. 백업: {backup}\n페이지를 새로고침하면 반영됩니다.\n(서버 재시작 필요)'})
+    # 데이터 재로드
+    try:
+        reload_all_data()
+        return jsonify({'ok':True,'msg':f'업로드 및 데이터 재로드 완료!\n백업: {backup}\n페이지를 새로고침하면 반영됩니다.'})
+    except Exception as e:
+        return jsonify({'ok':True,'msg':f'업로드 완료 (재로드 오류: {e})\n백업: {backup}'})
 
 @app.route('/api/upload_prod', methods=['POST'])
 @login_required
