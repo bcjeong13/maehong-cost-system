@@ -683,11 +683,13 @@ def api_prod_records():
         is_prod = pn in products
         is_semi = pn.startswith('E') and pn in semi_products
         if is_prod and pn in all_costs:
-            le = all_costs[pn]['m']['labor']; me = all_costs[pn]['m']['mat']; te = all_costs[pn]['m']['total']
+            le = all_costs[pn]['m']['labor']; le_r = all_costs[pn]['r']['labor']
+            me = all_costs[pn]['m']['mat']; te = all_costs[pn]['m']['total']
         elif is_semi and pn in semi_costs:
-            le = semi_costs[pn]['m']['labor']; me = 0; te = le
+            le = semi_costs[pn]['m']['labor']; le_r = semi_costs[pn]['r']['labor']
+            me = 0; te = le
         else:
-            le = me = te = 0
+            le = le_r = me = te = 0
         akey = actual_labor_key(r['date'], r['pn'], r['qty'])
         adata = actual_labor_data.get(akey, None)
         actual_total = calc_actual_labor(adata) if adata else None
@@ -703,7 +705,7 @@ def api_prod_records():
         std_ea_mh, std_info = get_std_ea_per_mh(pn)
         actual_ea_mh = round(r['qty'] / actual_mh, 2) if actual_mh > 0 else None
         productivity = round(actual_ea_mh / std_ea_mh * 100, 1) if actual_ea_mh and std_ea_mh > 0 else None
-        filtered.append({**r, 'is_prod':is_prod, 'labor_ea':round(le,2), 'mat_ea':round(me,2),
+        filtered.append({**r, 'is_prod':is_prod, 'labor_ea':round(le,2), 'labor_ea_r':round(le_r,2), 'mat_ea':round(me,2),
                          'total_ea':round(te,2), 'labor_sub':round(le*r['qty'],0), 'total_sub':round(te*r['qty'],0),
                          'actual_labor':actual_total, 'actual_labor_ea':actual_ea,
                          'actual_mh':round(actual_mh,1), 'std_ea_mh':round(std_ea_mh,1),
@@ -1422,7 +1424,7 @@ tr:hover{background:#edf2f7}
       <table id="prodTable">
         <thead><tr>
           <th>일자</th><th>품번</th><th>품명</th><th>구분</th><th>실적수량</th><th>ERP단가</th>
-          {% if is_admin %}<th>기준인건비/EA</th><th>실제인건비/EA</th>{% endif %}<th>기준 EA/MH</th><th>실제 EA/MH</th><th>생산성</th><th>비고</th>
+          {% if is_admin %}<th>인건비/EA(수작업)</th><th>인건비/EA(로터리)</th><th>실제인건비/EA</th>{% endif %}<th>기준 EA/MH</th><th>실제 EA/MH</th><th>생산성</th><th>비고</th>
         </tr></thead>
         <tbody id="prodBody"></tbody>
       </table>
@@ -2075,6 +2077,7 @@ async function loadProdRecords(){
       <td class="r">${fmt0(r.qty)}</td>
       <td class="r">${fmt0(r.erp_price)}</td>
       ${_isAdmin?`<td class="r clickable" onclick="openLabor('${r.pn}')" style="color:var(--accent)">${r.labor_ea?fmt0(r.labor_ea):'-'}</td>
+      <td class="r" style="color:var(--muted)">${r.labor_ea_r?fmt0(r.labor_ea_r):'-'}</td>
       ${actualEaCell}`:''}
 
       ${stdCell}
