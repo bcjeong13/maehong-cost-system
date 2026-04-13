@@ -2970,6 +2970,10 @@ def serve_logo():
     from flask import send_file
     return send_file(LOGO_PATH, mimetype='image/png')
 
+@app.route('/health')
+def health():
+    return 'OK', 200
+
 # ============================================================
 # 로그인/로그아웃
 # ============================================================
