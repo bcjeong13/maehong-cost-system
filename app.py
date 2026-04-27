@@ -2140,70 +2140,44 @@ tr:hover{background:#edf2f7}
 <!-- 탭8: 설정/관리 (admin only) -->
 {% if is_admin %}
 <div class="panel" id="p7">
-  <div class="compare-grid">
-    <!-- 파일 업로드 -->
-    <div class="card">
-      <h3>단가기준정리 파일 업데이트</h3>
-      <p style="font-size:13px;color:var(--muted);margin-bottom:16px">
-        단가기준정리.xlsx 파일을 새로 업로드하면 기존 파일은 자동 백업됩니다.<br>
-        업로드 후 서버를 재시작해야 데이터가 반영됩니다.
-      </p>
-      <div id="uploadArea" style="border:2px dashed var(--border);border-radius:10px;padding:32px;text-align:center;cursor:pointer;transition:.2s;background:#fafbfc"
-           ondragover="event.preventDefault();this.style.borderColor='var(--accent)';this.style.background='#f0f7ff'"
-           ondragleave="this.style.borderColor='var(--border)';this.style.background='#fafbfc'"
-           ondrop="handleDrop(event)" onclick="document.getElementById('fileInput').click()">
-        <div style="font-size:36px;margin-bottom:8px;opacity:.4">📁</div>
-        <div style="font-size:14px;font-weight:600;color:var(--text)">파일을 드래그하거나 클릭하여 선택</div>
-        <div style="font-size:12px;color:var(--muted);margin-top:4px">.xlsx 파일만 업로드 가능</div>
-      </div>
-      <input type="file" id="fileInput" accept=".xlsx" style="display:none" onchange="handleFile(this.files[0])">
-      <div id="uploadStatus" style="margin-top:12px"></div>
-    </div>
 
-    <!-- 인건비 관리 -->
-    <div class="card">
-      <h3>인건비 신규 등록</h3>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
-        <div>
-          <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">사원명</label>
-          <input id="empName" type="text" placeholder="이름 입력" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px">
-        </div>
-        <div>
-          <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">지급총액 (원/월)</label>
-          <input id="empPay" type="number" placeholder="예: 2500000" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px">
-        </div>
-      </div>
-      <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
-        <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer">
-          <input id="empCommon" type="checkbox" style="width:16px;height:16px"> 공통배부
-        </label>
-        <button onclick="addEmployee()" style="padding:8px 20px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer">추가</button>
-      </div>
-      <div id="empAddStatus" style="margin-bottom:8px"></div>
+  <!-- 1. 아마란스 ERP 동기화 -->
+  <div class="card" style="border-left:4px solid #7BC142">
+    <h3>🔗 아마란스 ERP 자동 동기화 <span style="font-size:12px;color:var(--muted);font-weight:400">— ERP에서 품목/BOM/생산실적/원부재료 단가를 자동 가져옵니다</span></h3>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px">
+      <button onclick="erpTest()" style="padding:8px 18px;background:#fff;border:1px solid var(--accent);color:var(--accent);border-radius:8px;font-size:13px;cursor:pointer;font-weight:600">연결 테스트</button>
+      <button onclick="erpSync('items')" style="padding:8px 18px;background:#0066cc;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer;font-weight:600">품목 동기화</button>
+      <button onclick="erpSync('bom')" style="padding:8px 18px;background:#0066cc;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer;font-weight:600">BOM 동기화</button>
+      <button onclick="erpSync('production')" style="padding:8px 18px;background:#0066cc;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer;font-weight:600">생산실적 동기화 (최근 30일)</button>
+      <button onclick="erpSync('materials')" style="padding:8px 18px;background:#0066cc;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer;font-weight:600">원부재료 단가 동기화 (최근 90일)</button>
+      <button onclick="erpSync('all')" style="padding:8px 24px;background:linear-gradient(135deg,#0066cc,#7BC142);color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;font-weight:700">⚡ 전체 동기화</button>
     </div>
+    <div id="erpStatus" style="margin-top:12px;font-size:13px;padding:8px 12px;background:#f8f9fa;border-radius:6px;min-height:24px"></div>
   </div>
 
-  <!-- 인건비 현황 테이블 -->
+  <!-- 2. 제품 정보 관리 -->
   <div class="card">
-    <h3>인건비 현황 ({{ emp_count }}명) <span style="font-size:12px;color:var(--muted);font-weight:400">— 지급총액을 직접 수정하고 저장 버튼을 누르세요</span></h3>
-    <div style="overflow-x:auto">
-    <table id="empTable" style="table-layout:fixed;width:100%">
+    <h3>제품 정보 관리 <span style="font-size:12px;color:var(--muted);font-weight:400">— ERP에 없는 카테고리/중량/유형 수동 보정</span></h3>
+    <div style="margin-bottom:10px">
+      <input type="text" id="prodSearchAdmin" placeholder="품번/품명 검색" oninput="filterProductTable()" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:12px;width:240px">
+    </div>
+    <div style="overflow-x:auto;max-height:400px;overflow-y:auto">
+    <table id="prodInfoTable" style="table-layout:fixed;width:100%">
       <colgroup>
-        <col style="width:60px"><col style="width:140px"><col style="width:180px">
-        <col style="width:140px"><col style="width:100px"><col style="width:160px">
+        <col style="width:80px"><col style="width:auto">
+        <col style="width:120px"><col style="width:90px"><col style="width:90px"><col style="width:80px">
       </colgroup>
       <thead><tr>
-        <th>No</th><th>사원명</th><th>지급총액(원)</th>
-        <th>시급(원)</th><th>공통배부</th><th>관리</th>
+        <th>품번</th><th>품명</th><th>카테고리</th><th>중량(g)</th><th>유형</th><th>관리</th>
       </tr></thead>
-      <tbody id="empBody"></tbody>
+      <tbody id="prodInfoBody"></tbody>
     </table>
     </div>
   </div>
 
-  <!-- 원부재료 단가 관리 -->
+  <!-- 3. 원부재료 단가 관리 -->
   <div class="card">
-    <h3>원부재료 단가 관리 <span style="font-size:12px;color:var(--muted);font-weight:400">— 단가를 직접 수정하고 저장 버튼을 누르세요</span></h3>
+    <h3>원부재료 단가 관리 <span style="font-size:12px;color:var(--muted);font-weight:400">— ERP 동기화 외 직접 수정도 가능</span></h3>
     <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px;padding:12px;background:#f8f9fa;border-radius:8px">
       <div>
         <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">품번</label>
@@ -2235,41 +2209,7 @@ tr:hover{background:#edf2f7}
     </div>
   </div>
 
-  <!-- 아마란스 ERP 동기화 -->
-  <div class="card" style="border-left:4px solid #7BC142">
-    <h3>🔗 아마란스 ERP 자동 동기화 <span style="font-size:12px;color:var(--muted);font-weight:400">— ERP에서 품목/BOM/생산실적을 자동으로 가져옵니다</span></h3>
-    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px">
-      <button onclick="erpTest()" style="padding:8px 18px;background:#fff;border:1px solid var(--accent);color:var(--accent);border-radius:8px;font-size:13px;cursor:pointer;font-weight:600">연결 테스트</button>
-      <button onclick="erpSync('items')" style="padding:8px 18px;background:#0066cc;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer;font-weight:600">품목 동기화</button>
-      <button onclick="erpSync('bom')" style="padding:8px 18px;background:#0066cc;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer;font-weight:600">BOM 동기화</button>
-      <button onclick="erpSync('production')" style="padding:8px 18px;background:#0066cc;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer;font-weight:600">생산실적 동기화 (최근 30일)</button>
-      <button onclick="erpSync('materials')" style="padding:8px 18px;background:#0066cc;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer;font-weight:600">원부재료 단가 동기화 (최근 90일)</button>
-      <button onclick="erpSync('all')" style="padding:8px 24px;background:linear-gradient(135deg,#0066cc,#7BC142);color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;font-weight:700">⚡ 전체 동기화</button>
-    </div>
-    <div id="erpStatus" style="margin-top:12px;font-size:13px;padding:8px 12px;background:#f8f9fa;border-radius:6px;min-height:24px"></div>
-  </div>
-
-  <!-- 제품 정보 관리 -->
-  <div class="card">
-    <h3>제품 정보 관리 <span style="font-size:12px;color:var(--muted);font-weight:400">— 카테고리/중량/유형은 ERP에서 자동 못 가져오니 수동 보정 가능</span></h3>
-    <div style="margin-bottom:10px">
-      <input type="text" id="prodSearchAdmin" placeholder="품번/품명 검색" oninput="filterProductTable()" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:12px;width:240px">
-    </div>
-    <div style="overflow-x:auto;max-height:500px;overflow-y:auto">
-    <table id="prodInfoTable" style="table-layout:fixed;width:100%">
-      <colgroup>
-        <col style="width:80px"><col style="width:auto">
-        <col style="width:120px"><col style="width:90px"><col style="width:90px"><col style="width:80px">
-      </colgroup>
-      <thead><tr>
-        <th>품번</th><th>품명</th><th>카테고리</th><th>중량(g)</th><th>유형</th><th>관리</th>
-      </tr></thead>
-      <tbody id="prodInfoBody"></tbody>
-    </table>
-    </div>
-  </div>
-
-  <!-- 기준CAPA 관리 -->
+  <!-- 4. 기준CAPA 관리 -->
   <div class="card">
     <h3>기준CAPA 관리 <span style="font-size:12px;color:var(--muted);font-weight:400">— 인원/CAPA를 수정하고 저장하면 전체 원가가 즉시 재계산됩니다</span></h3>
     <div style="overflow-x:auto">
@@ -2282,6 +2222,44 @@ tr:hover{background:#edf2f7}
         <th>No</th><th>공정</th><th>투입인원</th><th>인원수</th><th>CAPA</th><th>단위</th><th>관리</th>
       </tr></thead>
       <tbody id="capaBody"></tbody>
+    </table>
+    </div>
+  </div>
+
+  <!-- 5. 인건비 신규 등록 -->
+  <div class="card">
+    <h3>인건비 신규 등록</h3>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
+      <div>
+        <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">사원명</label>
+        <input id="empName" type="text" placeholder="이름 입력" style="padding:8px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;width:160px">
+      </div>
+      <div>
+        <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">지급총액 (원/월)</label>
+        <input id="empPay" type="number" placeholder="예: 2500000" style="padding:8px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;width:160px">
+      </div>
+      <label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;margin-bottom:8px">
+        <input id="empCommon" type="checkbox" style="width:16px;height:16px"> 공통배부
+      </label>
+      <button onclick="addEmployee()" style="padding:8px 20px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer">추가</button>
+      <div id="empAddStatus" style="font-size:12px;align-self:center"></div>
+    </div>
+  </div>
+
+  <!-- 6. 인건비 현황 -->
+  <div class="card">
+    <h3>인건비 현황 ({{ emp_count }}명) <span style="font-size:12px;color:var(--muted);font-weight:400">— 지급총액을 직접 수정하고 저장 버튼을 누르세요</span></h3>
+    <div style="overflow-x:auto">
+    <table id="empTable" style="table-layout:fixed;width:100%">
+      <colgroup>
+        <col style="width:60px"><col style="width:140px"><col style="width:180px">
+        <col style="width:140px"><col style="width:100px"><col style="width:160px">
+      </colgroup>
+      <thead><tr>
+        <th>No</th><th>사원명</th><th>지급총액(원)</th>
+        <th>시급(원)</th><th>공통배부</th><th>관리</th>
+      </tr></thead>
+      <tbody id="empBody"></tbody>
     </table>
     </div>
   </div>
