@@ -975,6 +975,36 @@ PROC_LABELS = {
     '오트밀':'오트밀생산','스틱':'유탕스틱생산','공통':'공통배부(관리자)',
 }
 
+# ============================================================
+# 제품 정보 (카테고리/중량/유형) 수정 API
+# ============================================================
+@app.route('/api/products')
+@login_required
+def api_products():
+    """제품 목록 (수정용)"""
+    rows = []
+    for pn, p in sorted(products.items()):
+        rows.append({'pn':pn,'name':p.get('name',''),'category':p.get('category',''),
+                     'weight_g':p.get('weight_g',0),'type':p.get('type','')})
+    return jsonify({'products': rows})
+
+@app.route('/api/products/update', methods=['POST'])
+@login_required
+@admin_required
+def api_product_update():
+    """제품의 카테고리/중량/유형 수정"""
+    d = request.get_json()
+    pn = (d.get('pn') or '').strip()
+    if pn not in products:
+        return jsonify({'ok':False,'msg':f'{pn}을(를) 찾을 수 없습니다'}), 404
+    if 'category' in d: products[pn]['category'] = d['category']
+    if 'weight_g' in d:
+        try: products[pn]['weight_g'] = int(d['weight_g'])
+        except: pass
+    if 'type' in d: products[pn]['type'] = d['type']
+    _recalc_all()
+    return jsonify({'ok':True,'msg':f'{pn} 수정 완료'})
+
 @app.route('/api/capa')
 @login_required
 @admin_required
@@ -1046,35 +1076,82 @@ def _erp_call(path, body=None, timeout=60):
     r = ext_requests.post(ERP_BASE + path, headers=_erp_headers(path), json=body, timeout=timeout)
     return r.json()
 
+import re as _re
+
+def _extract_meta_from_name(name):
+    """품명에서 카테고리/중량(g)/유형(낱봉/번들) 자동 추출"""
+    n = str(name)
+    # 카테고리
+    if '고구마' in n and '바' in n and ('스틱' in n or '바22' in n or '바20' in n or '바 ' in n):
+        cat = '고구마바류'
+    elif '오트밀' in n: cat = '오트밀류'
+    elif '카사바' in n: cat = '카사바류'
+    elif '누룽지' in n: cat = '누룽지류'
+    elif '고구마' in n: cat = '고구마류'
+    else: cat = '기타'
+    # 유형: "번들", "*5번들", "*5개", "5개입", "*10ea" 등
+    is_bundle = False
+    if '번들' in n: is_bundle = True
+    elif _re.search(r'\*\s*\d+\s*(개|ea|EA|입|개입|번들)', n): is_bundle = True
+    elif _re.search(r'\d+\s*개입', n): is_bundle = True
+    elif _re.search(r'_\s*\d+\s*개', n): is_bundle = True
+    ptype = '번들' if is_bundle else '낱봉'
+    # 중량(g): "80g", "100g", "1.5KG", "1KG", "330G"
+    weight_g = 0
+    m_kg = _re.search(r'(\d+(?:\.\d+)?)\s*[kK][gG]', n)
+    m_g = _re.search(r'(\d+(?:\.\d+)?)\s*[gG](?![a-zA-Z])', n)
+    if m_kg:
+        weight_g = float(m_kg.group(1)) * 1000
+    elif m_g:
+        weight_g = float(m_g.group(1))
+    # 번들이면 갯수 곱하기
+    if is_bundle:
+        m_pack = _re.search(r'\*\s*(\d+)|_\s*(\d+)\s*(개|번들|ea|EA|입)', n)
+        if m_pack:
+            count = int(m_pack.group(1) or m_pack.group(2) or 1)
+            if count > 1 and weight_g > 0:
+                weight_g *= count
+    return cat, ptype, int(weight_g)
+
 @app.route('/api/erp/sync_items', methods=['POST'])
 @login_required
 @admin_required
 def api_erp_sync_items():
-    """ERP 품목마스터 동기화 → products(자사 생산제품)"""
+    """ERP 품목마스터 동기화 → products(자사 생산제품, 미사용 제외)"""
     try:
         data = _erp_call('/apiproxy/api20A03S00301', {})
         if data.get('resultCode') != 0:
             return jsonify({'ok':False,'msg':f"ERP 오류: {data.get('resultMsg')}"}), 502
-        added = updated = 0
+        added = updated = skipped_unused = 0
         for d in data.get('resultData', []):
             pn = (d.get('itemCd') or '').strip()
             if not pn or not pn.startswith('G'):  # 자사제품만
                 continue
             name = d.get('itemNm') or ''
-            spec = d.get('itemDc') or ''
-            unit = d.get('unitDc') or ''
+            # 미사용 품목 제외
+            if name.startswith('미사용') or name.startswith('미사용_') or 'x미사용' in name or 'X미사용' in name:
+                # 이미 등록된 미사용 품목은 삭제
+                if pn in products:
+                    products.pop(pn, None)
+                skipped_unused += 1
+                continue
+            cat, ptype, weight_g = _extract_meta_from_name(name)
             if pn in products:
+                # 기존 정보(카테고리/유형/중량) 보존, 이름만 갱신
                 products[pn]['name'] = name
+                # 비어있던 필드만 자동 추출값으로 채움
+                if not products[pn].get('category'): products[pn]['category'] = cat
+                if not products[pn].get('type'): products[pn]['type'] = ptype
+                if not products[pn].get('weight_g'): products[pn]['weight_g'] = weight_g
                 updated += 1
             else:
-                # 신규 - 카테고리 추정
-                cat = '고구마류' if '고구마' in name and '바' not in name else ('고구마바류' if '바' in name else '기타')
-                ptype = '번들' if '번들' in name else '낱봉'
-                products[pn] = {'pn':pn,'name':name,'category':cat,'weight_g':0,'type':ptype}
+                products[pn] = {'pn':pn,'name':name,'category':cat,'weight_g':weight_g,'type':ptype}
                 added += 1
         # 원가 재계산
         _recalc_all()
-        return jsonify({'ok':True,'msg':f'품목 동기화 완료: 신규 {added}개 / 갱신 {updated}개','added':added,'updated':updated})
+        return jsonify({'ok':True,
+            'msg':f'품목 동기화 완료: 신규 {added}개 / 갱신 {updated}개 / 미사용제외 {skipped_unused}개',
+            'added':added,'updated':updated,'skipped':skipped_unused})
     except Exception as e:
         return jsonify({'ok':False,'msg':f'동기화 오류: {e}'}), 500
 
@@ -1168,21 +1245,27 @@ def api_erp_sync_all():
     """전체 동기화: 품목 → BOM → 생산실적"""
     results = {'items':None,'bom':None,'production':None}
     try:
-        # 1. 품목
+        # 1. 품목 (미사용 제외 + 자동추출)
         d1 = _erp_call('/apiproxy/api20A03S00301', {})
-        added=updated=0
+        added=updated=skipped=0
         if d1.get('resultCode')==0:
             for d in d1.get('resultData',[]):
                 pn = (d.get('itemCd') or '').strip()
                 if not pn or not pn.startswith('G'): continue
                 name = d.get('itemNm') or ''
+                if name.startswith('미사용') or 'x미사용' in name or 'X미사용' in name:
+                    if pn in products: products.pop(pn, None)
+                    skipped += 1; continue
+                cat, ptype, weight_g = _extract_meta_from_name(name)
                 if pn in products:
-                    products[pn]['name'] = name; updated += 1
+                    products[pn]['name'] = name
+                    if not products[pn].get('category'): products[pn]['category'] = cat
+                    if not products[pn].get('type'): products[pn]['type'] = ptype
+                    if not products[pn].get('weight_g'): products[pn]['weight_g'] = weight_g
+                    updated += 1
                 else:
-                    cat = '고구마류' if '고구마' in name and '바' not in name else ('고구마바류' if '바' in name else '기타')
-                    ptype = '번들' if '번들' in name else '낱봉'
-                    products[pn] = {'pn':pn,'name':name,'category':cat,'weight_g':0,'type':ptype}; added += 1
-        results['items'] = f'신규 {added} / 갱신 {updated}'
+                    products[pn] = {'pn':pn,'name':name,'category':cat,'weight_g':weight_g,'type':ptype}; added += 1
+        results['items'] = f'신규 {added} / 갱신 {updated} / 미사용제외 {skipped}'
 
         # 2. BOM
         targets = list(products.keys()) + list(semi_products.keys())
@@ -2164,6 +2247,26 @@ tr:hover{background:#edf2f7}
       <button onclick="erpSync('all')" style="padding:8px 24px;background:linear-gradient(135deg,#0066cc,#7BC142);color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;font-weight:700">⚡ 전체 동기화</button>
     </div>
     <div id="erpStatus" style="margin-top:12px;font-size:13px;padding:8px 12px;background:#f8f9fa;border-radius:6px;min-height:24px"></div>
+  </div>
+
+  <!-- 제품 정보 관리 -->
+  <div class="card">
+    <h3>제품 정보 관리 <span style="font-size:12px;color:var(--muted);font-weight:400">— 카테고리/중량/유형은 ERP에서 자동 못 가져오니 수동 보정 가능</span></h3>
+    <div style="margin-bottom:10px">
+      <input type="text" id="prodSearchAdmin" placeholder="품번/품명 검색" oninput="filterProductTable()" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:12px;width:240px">
+    </div>
+    <div style="overflow-x:auto;max-height:500px;overflow-y:auto">
+    <table id="prodInfoTable" style="table-layout:fixed;width:100%">
+      <colgroup>
+        <col style="width:80px"><col style="width:auto">
+        <col style="width:120px"><col style="width:90px"><col style="width:90px"><col style="width:80px">
+      </colgroup>
+      <thead><tr>
+        <th>품번</th><th>품명</th><th>카테고리</th><th>중량(g)</th><th>유형</th><th>관리</th>
+      </tr></thead>
+      <tbody id="prodInfoBody"></tbody>
+    </table>
+    </div>
   </div>
 
   <!-- 기준CAPA 관리 -->
@@ -3283,6 +3386,53 @@ async function erpSync(type){
 }
 
 // =========================================
+// 제품 정보 관리 (카테고리/중량/유형)
+// =========================================
+async function loadProductInfo(){
+  const res=await fetch('/api/products');
+  const d=await res.json();
+  const tbody=document.getElementById('prodInfoBody');
+  if(!tbody) return;
+  const cats=['고구마류','고구마바류','오트밀류','카사바류','누룽지류','기타'];
+  let html='';
+  d.products.forEach((p,i)=>{
+    const catOpts=cats.map(c=>`<option value="${c}" ${p.category===c?'selected':''}>${c}</option>`).join('');
+    html+=`<tr class="prod-row">
+      <td class="c" style="font-weight:600">${p.pn}</td>
+      <td style="font-size:12px">${p.name}</td>
+      <td><select id="pCat-${i}" data-pn="${p.pn}" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:5px;font-size:12px">${catOpts}</select></td>
+      <td><input type="number" value="${p.weight_g||0}" id="pW-${i}" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:5px;font-size:12px;text-align:right"></td>
+      <td><select id="pT-${i}" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:5px;font-size:12px">
+        <option value="낱봉" ${p.type==='낱봉'?'selected':''}>낱봉</option>
+        <option value="번들" ${p.type==='번들'?'selected':''}>번들</option>
+      </select></td>
+      <td class="c"><button onclick="saveProductInfo(${i})" style="padding:4px 12px;background:var(--accent);color:#fff;border:none;border-radius:5px;font-size:11px;cursor:pointer">저장</button></td>
+    </tr>`;
+  });
+  tbody.innerHTML=html;
+}
+
+async function saveProductInfo(idx){
+  const pn=document.getElementById('pCat-'+idx).dataset.pn;
+  const category=document.getElementById('pCat-'+idx).value;
+  const weight_g=parseInt(document.getElementById('pW-'+idx).value)||0;
+  const type=document.getElementById('pT-'+idx).value;
+  const res=await fetch('/api/products/update',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({pn,category,weight_g,type})});
+  const d=await res.json();
+  if(d.ok){
+    ['pCat-','pW-','pT-'].forEach(k=>{const el=document.getElementById(k+idx);if(el){el.style.background='#f0fff4';setTimeout(()=>{el.style.background=''},1500);}});
+  }else{alert(d.msg);}
+}
+
+function filterProductTable(){
+  const q=(document.getElementById('prodSearchAdmin')?.value||'').toLowerCase();
+  document.querySelectorAll('#prodInfoTable .prod-row').forEach(r=>{
+    r.style.display=r.textContent.toLowerCase().includes(q)?'':'none';
+  });
+}
+
+// =========================================
 // 기준CAPA 관리
 // =========================================
 async function loadCapa(){
@@ -3330,7 +3480,7 @@ showTab=function(n){
   origShowTab(n);
   if(n===1) loadProdRecords();
   if(n===4) initVerify();
-  if(n===7){loadEmployees();loadMaterials();loadCapa();}
+  if(n===7){loadEmployees();loadMaterials();loadCapa();loadProductInfo();}
 };
 document.addEventListener('DOMContentLoaded',()=>{
   if(document.querySelector('#p7.active')){loadEmployees();loadMaterials();}
