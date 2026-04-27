@@ -5,11 +5,17 @@
 클릭 시 BOM 상세 / 원부재료 계산식 / 인건비 계산식 모달 표시
 """
 import sys, os, json, openpyxl
+import hmac, hashlib, base64, time, secrets, string
 from collections import defaultdict
 from datetime import datetime
 from flask import Flask, render_template_string, jsonify, request, session, redirect, url_for
 from functools import wraps
 import shutil
+
+try:
+    import requests as ext_requests
+except ImportError:
+    ext_requests = None
 
 try:
     sys.stdout.reconfigure(encoding='utf-8')
@@ -1000,6 +1006,253 @@ def api_capa_update():
     return jsonify({'ok':True,'msg':f'{PROC_LABELS.get(key,key)} 변경 완료 (CAPA: {old["capa"]:,} → {PROC_META[key]["capa"]:,})'})
 
 # ============================================================
+# 아마란스 ERP 연동 (매홍엘앤에프)
+# ============================================================
+ERP_BASE = os.environ.get('ERP_BASE', 'https://gwa.maehong.kr')
+ERP_CALLER = os.environ.get('ERP_CALLER', 'API_gcmsAmaranth38463')
+ERP_TOKEN = os.environ.get('ERP_TOKEN', 'Ti8j2oRO0U79iJ64MJs8AEK4fogUwJ')
+ERP_HASH_KEY = os.environ.get('ERP_HASH_KEY', '37574822435571541185001468639172720537442495')
+ERP_GROUP_SEQ = os.environ.get('ERP_GROUP_SEQ', 'gcmsAmaranth38463')
+ERP_CO_CD = os.environ.get('ERP_CO_CD', '1000')
+
+def _erp_tid(n=30):
+    chars = string.ascii_lowercase + string.digits
+    return ''.join(secrets.choice(chars) for _ in range(n))
+
+def _erp_sign(token, tid, ts, url_path):
+    value = f"{token}{tid}{ts}{url_path}".encode('utf-8')
+    key = ERP_HASH_KEY.encode('utf-8')
+    digest = hmac.new(key, value, hashlib.sha256).digest()
+    return base64.b64encode(digest).decode('utf-8')
+
+def _erp_headers(url_path):
+    tid = _erp_tid()
+    ts = str(int(time.time()))
+    return {
+        'Content-Type': 'application/json;charset=UTF-8',
+        'callerName': ERP_CALLER,
+        'Authorization': f'Bearer {ERP_TOKEN}',
+        'transaction-id': tid,
+        'timestamp': ts,
+        'groupSeq': ERP_GROUP_SEQ,
+        'wehago-sign': _erp_sign(ERP_TOKEN, tid, ts, url_path),
+    }
+
+def _erp_call(path, body=None, timeout=60):
+    if ext_requests is None:
+        raise RuntimeError('requests 라이브러리가 설치되어 있지 않습니다')
+    body = body or {}
+    body.setdefault('coCd', ERP_CO_CD)
+    r = ext_requests.post(ERP_BASE + path, headers=_erp_headers(path), json=body, timeout=timeout)
+    return r.json()
+
+@app.route('/api/erp/sync_items', methods=['POST'])
+@login_required
+@admin_required
+def api_erp_sync_items():
+    """ERP 품목마스터 동기화 → products(자사 생산제품)"""
+    try:
+        data = _erp_call('/apiproxy/api20A03S00301', {})
+        if data.get('resultCode') != 0:
+            return jsonify({'ok':False,'msg':f"ERP 오류: {data.get('resultMsg')}"}), 502
+        added = updated = 0
+        for d in data.get('resultData', []):
+            pn = (d.get('itemCd') or '').strip()
+            if not pn or not pn.startswith('G'):  # 자사제품만
+                continue
+            name = d.get('itemNm') or ''
+            spec = d.get('itemDc') or ''
+            unit = d.get('unitDc') or ''
+            if pn in products:
+                products[pn]['name'] = name
+                updated += 1
+            else:
+                # 신규 - 카테고리 추정
+                cat = '고구마류' if '고구마' in name and '바' not in name else ('고구마바류' if '바' in name else '기타')
+                ptype = '번들' if '번들' in name else '낱봉'
+                products[pn] = {'pn':pn,'name':name,'category':cat,'weight_g':0,'type':ptype}
+                added += 1
+        # 원가 재계산
+        _recalc_all()
+        return jsonify({'ok':True,'msg':f'품목 동기화 완료: 신규 {added}개 / 갱신 {updated}개','added':added,'updated':updated})
+    except Exception as e:
+        return jsonify({'ok':False,'msg':f'동기화 오류: {e}'}), 500
+
+@app.route('/api/erp/sync_bom', methods=['POST'])
+@login_required
+@admin_required
+def api_erp_sync_bom():
+    """ERP BOM 동기화 → bom + bom_raw"""
+    try:
+        # 모든 자사제품 + 반제품의 BOM을 가져옴
+        targets = list(products.keys()) + list(semi_products.keys())
+        if not targets:
+            return jsonify({'ok':False,'msg':'동기화할 품번이 없습니다'}), 400
+        new_bom = defaultdict(list)
+        failed = []
+        for code in targets:
+            try:
+                data = _erp_call('/apiproxy/api20A00S01002', {'itemparentCd': code}, timeout=20)
+                if data.get('resultCode') == 0:
+                    for row in data.get('resultData', []):
+                        if row.get('level', 0) == 0: continue
+                        new_bom[code].append({
+                            'ja_pn': str(row.get('itemchildCd','')).strip(),
+                            'ja_name': row.get('itemchildNm') or '',
+                            'ja_type': row.get('itemchildDc') or '',
+                            'ja_unit': row.get('itemchildUnitDc') or '',
+                            'qty_net': row.get('justQt', 0),
+                            'loss_pct': row.get('lossRt', 0),
+                            'qty_req': row.get('realQt', 0),
+                        })
+                else:
+                    failed.append(code)
+            except Exception:
+                failed.append(code)
+        # 기존 BOM 교체
+        bom.clear(); bom_raw.clear()
+        for k, v in new_bom.items():
+            bom[k] = list(v); bom_raw[k] = list(v)
+        _recalc_all()
+        return jsonify({'ok':True,'msg':f'BOM 동기화 완료: {len(new_bom)}품목 / 실패 {len(failed)}','synced':len(new_bom),'failed':len(failed)})
+    except Exception as e:
+        return jsonify({'ok':False,'msg':f'동기화 오류: {e}'}), 500
+
+@app.route('/api/erp/sync_production', methods=['POST'])
+@login_required
+def api_erp_sync_production():
+    """ERP 생산실적 동기화 → prod_records (누적)"""
+    global prod_records
+    d = request.get_json() or {}
+    date_from = d.get('from','')  # YYYYMMDD
+    date_to = d.get('to','')
+    if not date_from or not date_to:
+        # 기본: 최근 30일
+        from datetime import timedelta
+        today = datetime.now()
+        date_to = today.strftime('%Y%m%d')
+        date_from = (today - timedelta(days=30)).strftime('%Y%m%d')
+    try:
+        data = _erp_call('/apiproxy/api20A03S00901', {'wrDtFrom':date_from,'wrDtTo':date_to})
+        if data.get('resultCode') != 0:
+            return jsonify({'ok':False,'msg':f"ERP 오류: {data.get('resultMsg')}"}), 502
+        new_rows = []
+        for r in data.get('resultData', []):
+            wr_dt = r.get('wrDt','')
+            date_str = f"{wr_dt[:4]}-{wr_dt[4:6]}-{wr_dt[6:8]}" if len(wr_dt)==8 else wr_dt
+            pn = (r.get('itemCd') or '').strip()
+            qty = r.get('workQt', 0) or r.get('goodQt', 0)
+            if not pn or not isinstance(qty, (int,float)) or qty <= 0:
+                continue
+            new_rows.append({
+                'date': date_str, 'pn': pn,
+                'name': r.get('itemNm') or '', 'qty': qty,
+                'erp_price': 0, 'bigo': str(r.get('remarkDc') or ''),
+            })
+        # 누적: 중복 제거
+        existing = set((r['date'],r['pn'],r['qty']) for r in prod_records)
+        added = 0
+        for r in new_rows:
+            if (r['date'],r['pn'],r['qty']) not in existing:
+                prod_records.append(r)
+                existing.add((r['date'],r['pn'],r['qty']))
+                added += 1
+        return jsonify({'ok':True,'msg':f'생산실적 {added}건 추가 (조회 {len(new_rows)}건, 중복 제외)','added':added,'total':len(prod_records)})
+    except Exception as e:
+        return jsonify({'ok':False,'msg':f'동기화 오류: {e}'}), 500
+
+@app.route('/api/erp/sync_all', methods=['POST'])
+@login_required
+@admin_required
+def api_erp_sync_all():
+    """전체 동기화: 품목 → BOM → 생산실적"""
+    results = {'items':None,'bom':None,'production':None}
+    try:
+        # 1. 품목
+        d1 = _erp_call('/apiproxy/api20A03S00301', {})
+        added=updated=0
+        if d1.get('resultCode')==0:
+            for d in d1.get('resultData',[]):
+                pn = (d.get('itemCd') or '').strip()
+                if not pn or not pn.startswith('G'): continue
+                name = d.get('itemNm') or ''
+                if pn in products:
+                    products[pn]['name'] = name; updated += 1
+                else:
+                    cat = '고구마류' if '고구마' in name and '바' not in name else ('고구마바류' if '바' in name else '기타')
+                    ptype = '번들' if '번들' in name else '낱봉'
+                    products[pn] = {'pn':pn,'name':name,'category':cat,'weight_g':0,'type':ptype}; added += 1
+        results['items'] = f'신규 {added} / 갱신 {updated}'
+
+        # 2. BOM
+        targets = list(products.keys()) + list(semi_products.keys())
+        new_bom = defaultdict(list); failed = 0
+        for code in targets:
+            try:
+                d2 = _erp_call('/apiproxy/api20A00S01002', {'itemparentCd': code}, timeout=20)
+                if d2.get('resultCode') == 0:
+                    for row in d2.get('resultData',[]):
+                        if row.get('level',0) == 0: continue
+                        new_bom[code].append({
+                            'ja_pn': str(row.get('itemchildCd','')).strip(),
+                            'ja_name': row.get('itemchildNm') or '',
+                            'ja_type': row.get('itemchildDc') or '',
+                            'ja_unit': row.get('itemchildUnitDc') or '',
+                            'qty_net': row.get('justQt',0), 'loss_pct': row.get('lossRt',0),
+                            'qty_req': row.get('realQt',0),
+                        })
+                else: failed += 1
+            except Exception: failed += 1
+        if new_bom:
+            bom.clear(); bom_raw.clear()
+            for k,v in new_bom.items():
+                bom[k] = list(v); bom_raw[k] = list(v)
+        results['bom'] = f'{len(new_bom)}품목 동기화 / 실패 {failed}'
+
+        # 3. 생산실적 (최근 30일)
+        from datetime import timedelta
+        today = datetime.now()
+        df = (today - timedelta(days=30)).strftime('%Y%m%d')
+        dt = today.strftime('%Y%m%d')
+        d3 = _erp_call('/apiproxy/api20A03S00901', {'wrDtFrom':df,'wrDtTo':dt})
+        prod_added = 0
+        if d3.get('resultCode')==0:
+            existing = set((r['date'],r['pn'],r['qty']) for r in prod_records)
+            for r in d3.get('resultData',[]):
+                wr_dt = r.get('wrDt','')
+                date_str = f"{wr_dt[:4]}-{wr_dt[4:6]}-{wr_dt[6:8]}" if len(wr_dt)==8 else wr_dt
+                pn = (r.get('itemCd') or '').strip()
+                qty = r.get('workQt',0) or r.get('goodQt',0)
+                if not pn or not isinstance(qty,(int,float)) or qty <= 0: continue
+                if (date_str,pn,qty) not in existing:
+                    prod_records.append({'date':date_str,'pn':pn,'name':r.get('itemNm') or '','qty':qty,
+                                          'erp_price':0,'bigo':str(r.get('remarkDc') or '')})
+                    existing.add((date_str,pn,qty))
+                    prod_added += 1
+        results['production'] = f'{prod_added}건 누적 추가 (최근 30일)'
+
+        # 재계산
+        _recalc_all()
+        return jsonify({'ok':True,'msg':'전체 동기화 완료','results':results})
+    except Exception as e:
+        return jsonify({'ok':False,'msg':f'동기화 오류: {e}','results':results}), 500
+
+@app.route('/api/erp/test')
+@login_required
+@admin_required
+def api_erp_test():
+    """ERP 연결 테스트"""
+    if ext_requests is None:
+        return jsonify({'ok':False,'msg':'requests 라이브러리 미설치'}), 500
+    try:
+        d = _erp_call('/apiproxy/api20A03S00301', {})
+        if d.get('resultCode') == 0:
+            return jsonify({'ok':True,'msg':f'ERP 연결 성공! 품목 {len(d.get("resultData",[]))}개 조회됨'})
+        return jsonify({'ok':False,'msg':f"ERP 오류: {d.get('resultMsg')}"}), 502
+    except Exception as e:
+        return jsonify({'ok':False,'msg':f'연결 오류: {e}'}), 500
+
+# ============================================================
 # 인건비 검증 API
 # ============================================================
 verify_data = {'cost_report': {}}  # 원가보고서만 별도, 생산실적은 prod_records 공유
@@ -1826,6 +2079,19 @@ tr:hover{background:#edf2f7}
       <tbody id="matBody"></tbody>
     </table>
     </div>
+  </div>
+
+  <!-- 아마란스 ERP 동기화 -->
+  <div class="card" style="border-left:4px solid #7BC142">
+    <h3>🔗 아마란스 ERP 자동 동기화 <span style="font-size:12px;color:var(--muted);font-weight:400">— ERP에서 품목/BOM/생산실적을 자동으로 가져옵니다</span></h3>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px">
+      <button onclick="erpTest()" style="padding:8px 18px;background:#fff;border:1px solid var(--accent);color:var(--accent);border-radius:8px;font-size:13px;cursor:pointer;font-weight:600">연결 테스트</button>
+      <button onclick="erpSync('items')" style="padding:8px 18px;background:#0066cc;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer;font-weight:600">품목 동기화</button>
+      <button onclick="erpSync('bom')" style="padding:8px 18px;background:#0066cc;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer;font-weight:600">BOM 동기화</button>
+      <button onclick="erpSync('production')" style="padding:8px 18px;background:#0066cc;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer;font-weight:600">생산실적 동기화 (최근 30일)</button>
+      <button onclick="erpSync('all')" style="padding:8px 24px;background:linear-gradient(135deg,#0066cc,#7BC142);color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;font-weight:700">⚡ 전체 동기화</button>
+    </div>
+    <div id="erpStatus" style="margin-top:12px;font-size:13px;padding:8px 12px;background:#f8f9fa;border-radius:6px;min-height:24px"></div>
   </div>
 
   <!-- 기준CAPA 관리 -->
@@ -2900,6 +3166,47 @@ function filterMatTable(){
   document.querySelectorAll('#matTable .mat-row').forEach(r=>{
     r.style.display=r.textContent.toLowerCase().includes(q)?'':'none';
   });
+}
+
+// =========================================
+// 아마란스 ERP 동기화
+// =========================================
+async function erpTest(){
+  const el=document.getElementById('erpStatus');
+  el.innerHTML='<span style="color:var(--accent)">⏳ ERP 연결 테스트 중...</span>';
+  try{
+    const res=await fetch('/api/erp/test');
+    const d=await res.json();
+    el.innerHTML=`<span style="color:${d.ok?'var(--good)':'var(--bad)'}">${d.ok?'✅':'❌'} ${d.msg}</span>`;
+  }catch(e){
+    el.innerHTML=`<span style="color:var(--bad)">❌ 오류: ${e.message}</span>`;
+  }
+}
+
+async function erpSync(type){
+  const el=document.getElementById('erpStatus');
+  const labels={items:'품목 마스터',bom:'BOM',production:'생산실적',all:'전체'};
+  el.innerHTML=`<span style="color:var(--accent)">⏳ ${labels[type]} 동기화 중... (BOM은 1~2분 소요)</span>`;
+  try{
+    const url=type==='all'?'/api/erp/sync_all':`/api/erp/sync_${type}`;
+    const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    const d=await res.json();
+    if(d.ok){
+      let html=`<span style="color:var(--good)">✅ ${d.msg}</span>`;
+      if(d.results){
+        html+=`<div style="margin-top:6px;font-size:12px;color:var(--muted)">
+          • 품목: ${d.results.items||'-'}<br>
+          • BOM: ${d.results.bom||'-'}<br>
+          • 생산실적: ${d.results.production||'-'}
+        </div>`;
+      }
+      el.innerHTML=html;
+    }else{
+      el.innerHTML=`<span style="color:var(--bad)">❌ ${d.msg}</span>`;
+    }
+  }catch(e){
+    el.innerHTML=`<span style="color:var(--bad)">❌ 오류: ${e.message}</span>`;
+  }
 }
 
 // =========================================
