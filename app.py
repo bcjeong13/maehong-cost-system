@@ -1231,11 +1231,80 @@ def api_erp_sync_all():
                     prod_added += 1
         results['production'] = f'{prod_added}건 누적 추가 (최근 30일)'
 
+        # 4. 원부재료 단가 (최근 90일 매입마감)
+        from datetime import timedelta
+        df_p = (today - timedelta(days=90)).strftime('%Y%m%d')
+        mat_updated = 0
+        try:
+            h4 = _erp_call('/apiproxy/api20A02S00101', {'poDtFrom':df_p,'poDtTo':dt})
+            if h4.get('resultCode') == 0:
+                for po in h4.get('resultData', [])[:200]:
+                    po_nb = po.get('poNb')
+                    if not po_nb: continue
+                    try:
+                        det = _erp_call('/apiproxy/api20A02S00102', {'poNb':po_nb}, timeout=20)
+                        for rr in det.get('resultData', []):
+                            pn = (rr.get('itemCd') or '').strip()
+                            price = rr.get('poUprc', 0) or rr.get('poUnitPrc', 0)
+                            if not pn or not isinstance(price, (int,float)) or price <= 0: continue
+                            dt_str = po.get('poDt','')
+                            try: dtv = datetime.strptime(dt_str,'%Y%m%d')
+                            except: dtv = datetime.now()
+                            if pn not in material_prices or material_prices[pn].get('date') is None or dtv > material_prices[pn]['date']:
+                                material_prices[pn] = {'price':price,'date':dtv}
+                                mat_updated += 1
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        results['materials'] = f'{mat_updated}건 갱신 (최근 90일 매입)'
+
         # 재계산
         _recalc_all()
         return jsonify({'ok':True,'msg':'전체 동기화 완료','results':results})
     except Exception as e:
         return jsonify({'ok':False,'msg':f'동기화 오류: {e}','results':results}), 500
+
+@app.route('/api/erp/sync_materials', methods=['POST'])
+@login_required
+@admin_required
+def api_erp_sync_materials():
+    """ERP 매입마감 → 원부재료 단가 갱신"""
+    d = request.get_json() or {}
+    from datetime import timedelta
+    today = datetime.now()
+    days = int(d.get('days', 90))
+    date_to = today.strftime('%Y%m%d')
+    date_from = (today - timedelta(days=days)).strftime('%Y%m%d')
+    try:
+        # 매입마감 헤더 조회
+        h = _erp_call('/apiproxy/api20A02S00101', {'poDtFrom':date_from,'poDtTo':date_to})
+        if h.get('resultCode') != 0:
+            return jsonify({'ok':False,'msg':f"ERP 오류: {h.get('resultMsg')}"}), 502
+        po_list = h.get('resultData', [])
+        # 각 발주번호의 디테일 조회 → 단가 추출
+        updated = 0
+        for po in po_list[:200]:  # 안전장치
+            po_nb = po.get('poNb')
+            if not po_nb: continue
+            try:
+                det = _erp_call('/apiproxy/api20A02S00102', {'poNb':po_nb}, timeout=20)
+                for r in det.get('resultData', []):
+                    pn = (r.get('itemCd') or '').strip()
+                    price = r.get('poUprc', 0) or r.get('poUnitPrc', 0)  # 단가
+                    if not pn or not isinstance(price, (int,float)) or price <= 0: continue
+                    dt_str = po.get('poDt','')
+                    dt = datetime.strptime(dt_str,'%Y%m%d') if len(dt_str)==8 else datetime.now()
+                    # 최신 단가 우선
+                    if pn not in material_prices or (material_prices[pn].get('date') is None or dt > material_prices[pn]['date']):
+                        material_prices[pn] = {'price':price,'date':dt}
+                        updated += 1
+            except Exception:
+                continue
+        _recalc_all()
+        return jsonify({'ok':True,'msg':f'원부재료 단가 {updated}건 갱신 (최근 {days}일 매입)','updated':updated})
+    except Exception as e:
+        return jsonify({'ok':False,'msg':f'동기화 오류: {e}'}), 500
 
 @app.route('/api/erp/test')
 @login_required
@@ -1715,20 +1784,22 @@ tr:hover{background:#edf2f7}
 
 <!-- 탭2: 일자별 생산실적 -->
 <div class="panel" id="p1">
-  <!-- 업로드 + 필터 -->
+  <!-- ERP 동기화 + 필터 -->
   <div class="card">
-    <h3>생산실적 데이터 관리</h3>
+    <h3>생산실적 데이터 <span style="font-size:12px;color:var(--muted);font-weight:400">— 아마란스 ERP에서 자동 가져오기</span></h3>
     <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end">
-      <!-- 업로드 -->
       <div style="flex:1;min-width:280px">
-        <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">생산실적 파일 업로드 (.xlsx)</label>
         <div style="display:flex;gap:8px;align-items:center">
-          <input type="file" id="prodFileInput" accept=".xlsx" style="font-size:12px;flex:1">
-          <select id="prodMode" style="padding:7px 10px;border:1px solid var(--border);border-radius:6px;font-size:12px">
-            <option value="append">누적 추가</option>
-            <option value="replace">전체 교체</option>
-          </select>
-          <button onclick="uploadProd()" style="padding:7px 16px;background:var(--accent);color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap">업로드</button>
+          <div>
+            <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">기간 (일)</label>
+            <select id="prodSyncDays" style="padding:7px 10px;border:1px solid var(--border);border-radius:6px;font-size:12px">
+              <option value="7">최근 7일</option>
+              <option value="30" selected>최근 30일</option>
+              <option value="60">최근 60일</option>
+              <option value="90">최근 90일</option>
+            </select>
+          </div>
+          <button onclick="syncProdFromERP()" style="padding:7px 18px;background:linear-gradient(135deg,#0066cc,#7BC142);color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer;margin-top:18px">⚡ ERP 동기화</button>
         </div>
         <div id="prodUploadStatus" style="margin-top:6px;font-size:12px"></div>
       </div>
@@ -2089,6 +2160,7 @@ tr:hover{background:#edf2f7}
       <button onclick="erpSync('items')" style="padding:8px 18px;background:#0066cc;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer;font-weight:600">품목 동기화</button>
       <button onclick="erpSync('bom')" style="padding:8px 18px;background:#0066cc;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer;font-weight:600">BOM 동기화</button>
       <button onclick="erpSync('production')" style="padding:8px 18px;background:#0066cc;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer;font-weight:600">생산실적 동기화 (최근 30일)</button>
+      <button onclick="erpSync('materials')" style="padding:8px 18px;background:#0066cc;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer;font-weight:600">원부재료 단가 동기화 (최근 90일)</button>
       <button onclick="erpSync('all')" style="padding:8px 24px;background:linear-gradient(135deg,#0066cc,#7BC142);color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;font-weight:700">⚡ 전체 동기화</button>
     </div>
     <div id="erpStatus" style="margin-top:12px;font-size:13px;padding:8px 12px;background:#f8f9fa;border-radius:6px;min-height:24px"></div>
@@ -2335,23 +2407,24 @@ async function openLabor(pn, mode){
 // 일자별 생산실적 탭
 // =========================================
 
-async function uploadProd(){
-  const fileInput=document.getElementById('prodFileInput');
-  const file=fileInput.files[0];
-  if(!file){document.getElementById('prodUploadStatus').innerHTML='<span style="color:var(--bad)">파일을 선택하세요</span>';return;}
-  const mode=document.getElementById('prodMode').value;
-  document.getElementById('prodUploadStatus').innerHTML='<span style="color:var(--accent)">업로드 중...</span>';
-  const fd=new FormData();
-  fd.append('file',file);
-  fd.append('mode',mode);
-  const res=await fetch('/api/upload_prod',{method:'POST',body:fd});
-  const d=await res.json();
-  if(d.ok){
-    document.getElementById('prodUploadStatus').innerHTML=`<span style="color:var(--good)">${d.msg} (총 ${d.total}건)</span>`;
-    fileInput.value='';
-    loadProdRecords();
-  } else {
-    document.getElementById('prodUploadStatus').innerHTML=`<span style="color:var(--bad)">${d.msg}</span>`;
+async function syncProdFromERP(){
+  const days=parseInt(document.getElementById('prodSyncDays').value)||30;
+  const today=new Date();
+  const from=new Date(today); from.setDate(from.getDate()-days);
+  const fmt=d=>d.toISOString().slice(0,10).replace(/-/g,'');
+  document.getElementById('prodUploadStatus').innerHTML='<span style="color:var(--accent)">⏳ ERP에서 생산실적 가져오는 중...</span>';
+  try{
+    const res=await fetch('/api/erp/sync_production',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({from:fmt(from),to:fmt(today)})});
+    const d=await res.json();
+    if(d.ok){
+      document.getElementById('prodUploadStatus').innerHTML=`<span style="color:var(--good)">✅ ${d.msg}</span>`;
+      loadProdRecords();
+    }else{
+      document.getElementById('prodUploadStatus').innerHTML=`<span style="color:var(--bad)">❌ ${d.msg}</span>`;
+    }
+  }catch(e){
+    document.getElementById('prodUploadStatus').innerHTML=`<span style="color:var(--bad)">❌ 오류: ${e.message}</span>`;
   }
 }
 
@@ -3185,7 +3258,7 @@ async function erpTest(){
 
 async function erpSync(type){
   const el=document.getElementById('erpStatus');
-  const labels={items:'품목 마스터',bom:'BOM',production:'생산실적',all:'전체'};
+  const labels={items:'품목 마스터',bom:'BOM',production:'생산실적',materials:'원부재료 단가',all:'전체'};
   el.innerHTML=`<span style="color:var(--accent)">⏳ ${labels[type]} 동기화 중... (BOM은 1~2분 소요)</span>`;
   try{
     const url=type==='all'?'/api/erp/sync_all':`/api/erp/sync_${type}`;
