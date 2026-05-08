@@ -3478,13 +3478,30 @@ function filterMatTable(){
 // =========================================
 // 아마란스 ERP 동기화
 // =========================================
+async function _safeJson(res){
+  const ct=res.headers.get('content-type')||'';
+  if(ct.includes('application/json')){
+    return await res.json();
+  }
+  // JSON이 아니면 (HTML 등) → 상태별 처리
+  const txt=await res.text();
+  if(res.status===401||txt.includes('login')||txt.includes('로그인')){
+    return {ok:false,msg:'로그인 세션 만료. 페이지를 새로고침하고 다시 로그인하세요',_redirect:true};
+  }
+  if(res.status>=500){
+    return {ok:false,msg:`서버 오류 ${res.status}: 서버 로그를 확인하세요`};
+  }
+  return {ok:false,msg:`예기치 못한 응답: ${txt.slice(0,80)}...`};
+}
+
 async function erpTest(){
   const el=document.getElementById('erpStatus');
   el.innerHTML='<span style="color:var(--accent)">⏳ ERP 연결 테스트 중...</span>';
   try{
     const res=await fetch('/api/erp/test');
-    const d=await res.json();
+    const d=await _safeJson(res);
     el.innerHTML=`<span style="color:${d.ok?'var(--good)':'var(--bad)'}">${d.ok?'✅':'❌'} ${d.msg}</span>`;
+    if(d._redirect) setTimeout(()=>location.href='/login',1500);
   }catch(e){
     el.innerHTML=`<span style="color:var(--bad)">❌ 오류: ${e.message}</span>`;
   }
@@ -3497,7 +3514,7 @@ async function erpSync(type){
   try{
     const url=type==='all'?'/api/erp/sync_all':`/api/erp/sync_${type}`;
     const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
-    const d=await res.json();
+    const d=await _safeJson(res);
     if(d.ok){
       let html=`<span style="color:var(--good)">✅ ${d.msg}</span>`;
       if(d.results){
@@ -3510,6 +3527,7 @@ async function erpSync(type){
       el.innerHTML=html;
     }else{
       el.innerHTML=`<span style="color:var(--bad)">❌ ${d.msg}</span>`;
+      if(d._redirect) setTimeout(()=>location.href='/login',1500);
     }
   }catch(e){
     el.innerHTML=`<span style="color:var(--bad)">❌ 오류: ${e.message}</span>`;
