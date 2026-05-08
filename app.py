@@ -29,12 +29,33 @@ app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB
 app.secret_key = os.environ.get('SECRET_KEY', 'maehong-cost-system-2026-secret')
 
 # ============================================================
-# 사용자 계정 (추후 DB로 전환 가능)
+# 사용자 계정 (users.json 파일에 저장)
 # ============================================================
-USERS = {
+USERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'users.json')
+DEFAULT_USERS = {
     'admin': {'password': 'admin1234', 'role': 'admin', 'name': '관리자'},
     'user':  {'password': 'user1234',  'role': 'user',  'name': '사용자'},
 }
+
+def _load_users():
+    try:
+        if os.path.exists(USERS_FILE):
+            with open(USERS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        print(f'[users] load error: {e}')
+    return dict(DEFAULT_USERS)
+
+def _save_users():
+    try:
+        with open(USERS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(USERS, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f'[users] save error: {e}')
+        return False
+
+USERS = _load_users()
 
 def login_required(f):
     @wraps(f)
@@ -976,6 +997,95 @@ PROC_LABELS = {
 }
 
 # ============================================================
+# 사용자 계정 관리 API
+# ============================================================
+@app.route('/api/users')
+@login_required
+@admin_required
+def api_users():
+    """사용자 목록 (비밀번호 제외)"""
+    rows = []
+    for uid, u in USERS.items():
+        rows.append({'id':uid,'name':u.get('name',''),'role':u.get('role','user')})
+    return jsonify({'users':rows})
+
+@app.route('/api/users/add', methods=['POST'])
+@login_required
+@admin_required
+def api_user_add():
+    """사용자 신규 추가"""
+    d = request.get_json()
+    uid = (d.get('id') or '').strip()
+    pwd = d.get('password') or ''
+    name = (d.get('name') or '').strip() or uid
+    role = d.get('role') or 'user'
+    if not uid or not pwd:
+        return jsonify({'ok':False,'msg':'아이디/비밀번호를 입력하세요'}), 400
+    if uid in USERS:
+        return jsonify({'ok':False,'msg':f'{uid}는 이미 존재합니다'}), 400
+    if role not in ('admin','user'):
+        return jsonify({'ok':False,'msg':'권한은 admin/user만 가능'}), 400
+    USERS[uid] = {'password':pwd,'role':role,'name':name}
+    _save_users()
+    return jsonify({'ok':True,'msg':f'{uid} 추가 완료'})
+
+@app.route('/api/users/update', methods=['POST'])
+@login_required
+@admin_required
+def api_user_update():
+    """비밀번호/이름/권한 변경"""
+    d = request.get_json()
+    uid = (d.get('id') or '').strip()
+    if uid not in USERS:
+        return jsonify({'ok':False,'msg':f'{uid}를 찾을 수 없습니다'}), 404
+    if 'password' in d and d['password']:
+        USERS[uid]['password'] = d['password']
+    if 'name' in d:
+        USERS[uid]['name'] = d['name'] or uid
+    if 'role' in d and d['role'] in ('admin','user'):
+        USERS[uid]['role'] = d['role']
+    _save_users()
+    return jsonify({'ok':True,'msg':f'{uid} 변경 완료'})
+
+@app.route('/api/users/delete', methods=['POST'])
+@login_required
+@admin_required
+def api_user_delete():
+    """사용자 삭제"""
+    d = request.get_json()
+    uid = (d.get('id') or '').strip()
+    if uid not in USERS:
+        return jsonify({'ok':False,'msg':f'{uid}를 찾을 수 없습니다'}), 404
+    if uid == session.get('user'):
+        return jsonify({'ok':False,'msg':'본인 계정은 삭제할 수 없습니다'}), 400
+    # 마지막 admin은 삭제 불가
+    if USERS[uid]['role'] == 'admin':
+        admin_count = sum(1 for u in USERS.values() if u.get('role')=='admin')
+        if admin_count <= 1:
+            return jsonify({'ok':False,'msg':'마지막 관리자는 삭제할 수 없습니다'}), 400
+    del USERS[uid]
+    _save_users()
+    return jsonify({'ok':True,'msg':f'{uid} 삭제 완료'})
+
+@app.route('/api/users/change_password', methods=['POST'])
+@login_required
+def api_user_change_password():
+    """본인 비밀번호 변경 (모든 사용자 가능)"""
+    d = request.get_json()
+    cur = d.get('current') or ''
+    new_pwd = d.get('new') or ''
+    uid = session.get('user')
+    if not uid or uid not in USERS:
+        return jsonify({'ok':False,'msg':'세션 오류'}), 401
+    if USERS[uid]['password'] != cur:
+        return jsonify({'ok':False,'msg':'현재 비밀번호가 일치하지 않습니다'}), 400
+    if len(new_pwd) < 4:
+        return jsonify({'ok':False,'msg':'비밀번호는 4자 이상'}), 400
+    USERS[uid]['password'] = new_pwd
+    _save_users()
+    return jsonify({'ok':True,'msg':'비밀번호 변경 완료'})
+
+# ============================================================
 # 제품 정보 (카테고리/중량/유형) 수정 API
 # ============================================================
 @app.route('/api/products')
@@ -1806,7 +1916,11 @@ tr:hover{background:#edf2f7}
     </div>
     <div style="border-left:1px solid rgba(255,255,255,.3);padding-left:16px">
       <div style="font-size:13px">{{ user_name }} {% if is_admin %}<span style="background:rgba(255,255,255,.2);padding:1px 6px;border-radius:4px;font-size:10px">ADMIN</span>{% endif %}</div>
-      <a href="/logout" style="color:rgba(255,255,255,.7);font-size:11px;text-decoration:none">로그아웃</a>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:2px">
+        <a href="javascript:openChangePassword()" style="color:rgba(255,255,255,.85);font-size:11px;text-decoration:none">비밀번호 변경</a>
+        <span style="color:rgba(255,255,255,.4);font-size:11px">|</span>
+        <a href="/logout" style="color:rgba(255,255,255,.7);font-size:11px;text-decoration:none">로그아웃</a>
+      </div>
     </div>
   </div>
 </div>
@@ -2155,7 +2269,46 @@ tr:hover{background:#edf2f7}
     <div id="erpStatus" style="margin-top:12px;font-size:13px;padding:8px 12px;background:#f8f9fa;border-radius:6px;min-height:24px"></div>
   </div>
 
-  <!-- 2. 제품 정보 관리 -->
+  <!-- 2. 계정 관리 -->
+  <div class="card">
+    <h3>👤 계정 관리 <span style="font-size:12px;color:var(--muted);font-weight:400">— 사용자 추가/삭제, 비밀번호/권한 변경</span></h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0;padding:10px;background:#f8f9fa;border-radius:8px;align-items:flex-end">
+      <div>
+        <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:3px">아이디</label>
+        <input id="newUserId" type="text" placeholder="예: kim" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;width:120px">
+      </div>
+      <div>
+        <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:3px">비밀번호</label>
+        <input id="newUserPw" type="text" placeholder="4자 이상" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;width:140px">
+      </div>
+      <div>
+        <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:3px">이름</label>
+        <input id="newUserName" type="text" placeholder="표시이름" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;width:120px">
+      </div>
+      <div>
+        <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:3px">권한</label>
+        <select id="newUserRole" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px">
+          <option value="user">user</option><option value="admin">admin</option>
+        </select>
+      </div>
+      <button onclick="addUser()" style="padding:7px 16px;background:var(--accent);color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer">추가</button>
+      <span id="userStatus" style="font-size:12px"></span>
+    </div>
+    <div style="overflow-x:auto">
+    <table id="usersTable" style="table-layout:fixed;width:100%">
+      <colgroup>
+        <col style="width:60px"><col style="width:120px"><col style="width:160px"><col style="width:160px"><col style="width:100px"><col style="width:140px">
+      </colgroup>
+      <thead><tr>
+        <th>No</th><th>아이디</th><th>이름</th><th>비밀번호 변경</th><th>권한</th><th>관리</th>
+      </tr></thead>
+      <tbody id="usersBody"></tbody>
+    </table>
+    </div>
+    <div style="margin-top:8px;font-size:11px;color:var(--muted)">⚠️ Render 무료 플랜은 재배포 시 변경사항이 초기화될 수 있습니다.</div>
+  </div>
+
+  <!-- 3. 제품 정보 관리 -->
   <div class="card">
     <h3>제품 정보 관리 <span style="font-size:12px;color:var(--muted);font-weight:400">— ERP에 없는 카테고리/중량/유형 수동 보정</span></h3>
     <div style="margin-bottom:10px">
@@ -3364,6 +3517,96 @@ async function erpSync(type){
 }
 
 // =========================================
+// =========================================
+// 계정 관리
+// =========================================
+async function loadUsers(){
+  const res=await fetch('/api/users');
+  const d=await res.json();
+  const tbody=document.getElementById('usersBody');
+  if(!tbody) return;
+  let html='';
+  d.users.forEach((u,i)=>{
+    html+=`<tr>
+      <td class="c">${i+1}</td>
+      <td class="c" style="font-weight:600">${u.id}</td>
+      <td><input type="text" value="${u.name||''}" id="uN-${i}" data-id="${u.id}"
+        style="width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:5px;font-size:12px"></td>
+      <td><input type="text" placeholder="새 비밀번호" id="uP-${i}"
+        style="width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:5px;font-size:12px"></td>
+      <td class="c"><select id="uR-${i}" style="width:100%;padding:5px;border:1px solid var(--border);border-radius:5px;font-size:12px">
+        <option value="user" ${u.role==='user'?'selected':''}>user</option>
+        <option value="admin" ${u.role==='admin'?'selected':''}>admin</option>
+      </select></td>
+      <td class="c">
+        <button onclick="updateUser(${i})" style="padding:4px 10px;background:var(--accent);color:#fff;border:none;border-radius:5px;font-size:11px;cursor:pointer;margin-right:4px">저장</button>
+        <button onclick="deleteUser('${u.id}')" style="padding:4px 10px;background:var(--bad);color:#fff;border:none;border-radius:5px;font-size:11px;cursor:pointer">삭제</button>
+      </td>
+    </tr>`;
+  });
+  tbody.innerHTML=html;
+}
+async function addUser(){
+  const id=document.getElementById('newUserId').value.trim();
+  const password=document.getElementById('newUserPw').value;
+  const name=document.getElementById('newUserName').value.trim();
+  const role=document.getElementById('newUserRole').value;
+  if(!id||!password){document.getElementById('userStatus').innerHTML='<span style="color:var(--bad)">아이디/비밀번호 필수</span>';return;}
+  const res=await fetch('/api/users/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,password,name,role})});
+  const d=await res.json();
+  document.getElementById('userStatus').innerHTML=`<span style="color:${d.ok?'var(--good)':'var(--bad)'}">${d.msg}</span>`;
+  if(d.ok){
+    document.getElementById('newUserId').value='';
+    document.getElementById('newUserPw').value='';
+    document.getElementById('newUserName').value='';
+    loadUsers();
+  }
+}
+async function updateUser(idx){
+  const id=document.getElementById('uN-'+idx).dataset.id;
+  const name=document.getElementById('uN-'+idx).value.trim();
+  const password=document.getElementById('uP-'+idx).value;
+  const role=document.getElementById('uR-'+idx).value;
+  const body={id,name,role};
+  if(password) body.password=password;
+  const res=await fetch('/api/users/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const d=await res.json();
+  if(d.ok){
+    document.getElementById('userStatus').innerHTML=`<span style="color:var(--good)">${d.msg}</span>`;
+    document.getElementById('uP-'+idx).value='';
+  }else{alert(d.msg);}
+}
+async function deleteUser(id){
+  if(!confirm(`${id} 사용자를 삭제하시겠습니까?`)) return;
+  const res=await fetch('/api/users/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
+  const d=await res.json();
+  if(d.ok){loadUsers();}else{alert(d.msg);}
+}
+
+// 비밀번호 변경 모달 (모든 사용자)
+function openChangePassword(){
+  const html=`
+    <div style="padding:20px 4px">
+      <p style="margin-bottom:14px;color:var(--muted);font-size:13px">현재 비밀번호와 새 비밀번호를 입력하세요</p>
+      <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">현재 비밀번호</label>
+      <input id="cpCur" type="password" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:14px;margin-bottom:14px">
+      <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">새 비밀번호 (4자 이상)</label>
+      <input id="cpNew" type="password" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:14px">
+      <div id="cpStatus" style="margin-top:10px;font-size:13px"></div>
+      <button onclick="submitChangePassword()" style="margin-top:16px;padding:11px;background:linear-gradient(135deg,#0066cc,#7BC142);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;width:100%">변경하기</button>
+    </div>`;
+  openModal('비밀번호 변경','본인 계정의 비밀번호를 변경합니다',html);
+}
+async function submitChangePassword(){
+  const cur=document.getElementById('cpCur').value;
+  const nw=document.getElementById('cpNew').value;
+  if(!cur||!nw){document.getElementById('cpStatus').innerHTML='<span style="color:var(--bad)">현재/새 비밀번호 모두 입력</span>';return;}
+  const res=await fetch('/api/users/change_password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({current:cur,new:nw})});
+  const d=await res.json();
+  document.getElementById('cpStatus').innerHTML=`<span style="color:${d.ok?'var(--good)':'var(--bad)'}">${d.msg}</span>`;
+  if(d.ok){setTimeout(closeModal,1200);}
+}
+
 // 제품 정보 관리 (카테고리/중량/유형)
 // =========================================
 async function loadProductInfo(){
@@ -3458,7 +3701,7 @@ showTab=function(n){
   origShowTab(n);
   if(n===1) loadProdRecords();
   if(n===4) initVerify();
-  if(n===7){loadEmployees();loadMaterials();loadCapa();loadProductInfo();}
+  if(n===7){loadEmployees();loadMaterials();loadCapa();loadProductInfo();loadUsers();}
 };
 document.addEventListener('DOMContentLoaded',()=>{
   if(document.querySelector('#p7.active')){loadEmployees();loadMaterials();}
